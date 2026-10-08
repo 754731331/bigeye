@@ -28,12 +28,16 @@ ROOT_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else
 INDEX_DB = os.path.join(ROOT_DIR, "data", "tool_index.db")
 INDEX_TABLE = "idx_tool_defs"
 
+from tools.registry import stable_state
+
 # 每轮默认注入的长尾工具数（其余走 discover_tools 兜底）
 DEFAULT_TOP_K = 8
 
 # 进程内缓存：name -> {"rowid": int, "embedding": list}
-_index_cache: dict[str, dict] = {}
-_index_lock = threading.Lock()
+# ⚠️ stable_state：hot_reload 会 reload 本模块，缓存与锁要一起跨 reload 稳定；
+# 只稳一个会把"同一份缓存"拆到两把锁下（检索时 dict 并发读写报错）。
+_index_cache = stable_state("tool_router_index_cache", dict)
+_index_lock = stable_state("tool_router_index_lock", threading.Lock)
 _index_built = False
 
 

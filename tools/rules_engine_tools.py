@@ -15,11 +15,13 @@ _root = os.path.dirname(_here)
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
-from tools.registry import register_tool
+from tools.registry import register_tool, stable_state
 
 RULES_DIR = os.path.join(_root, "rules_engine")
 RULES_FILE = os.path.join(RULES_DIR, "rules.json")
-_lock = threading.Lock()
+# ⚠️ stable_state：hot_reload 会 reload 本模块，模块级锁被重建 → 两个线程可同时
+# 跑"读 rules.json → 改 → 写回"，后写的覆盖先写的（丢规则）。
+_lock = stable_state("rules_engine_lock", threading.Lock)
 
 
 def _load():

@@ -22,6 +22,8 @@ import time
 
 import numpy as np
 
+from .registry import stable_state
+
 # ── 配置 ────────────────────────────────────────────
 DIM = 1000          # 编码维度
 K_SPARSE = 30       # 每条目哈希编码中 1 的个数 (3% 稀疏)
@@ -34,8 +36,12 @@ _DB_PATH = os.path.join(
     "data", "om_memory.db",
 )
 
-_lock = threading.Lock()
-_instance = {}  # 域级单例: {domain: OrderMemory}（bug修复：原不分域单例会让双域互相污染）
+# ⚠️ stable_state：hot_reload 会 reload 本模块，模块级的锁与域级单例字典都会被
+# 重新构造 → 出现两把锁 / 第二套 OrderMemory 实例（旧的还在被在跑的循环引用），
+# 双实例各持一份 w 权重、交替写同一个 om_memory.db。同 get_om 的"域级单例"是同
+# 一类 bug（原不分域单例已让双域互相污染一次）。对象挂 builtins 上，跨 reload 稳定。
+_lock = stable_state("om_core_lock", threading.Lock)
+_instance = stable_state("om_core_instance", dict)  # 域级单例: {domain: OrderMemory}
 
 
 def item_vector(item_id: str, dim: int = DIM, k: int = K_SPARSE) -> np.ndarray:

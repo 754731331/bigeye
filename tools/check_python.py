@@ -80,6 +80,7 @@ def check_python(path: str):
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15,
             cwd=os.path.dirname(full) or ".",
             env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0,
         )
 
         if result.returncode == 0:
@@ -146,6 +147,7 @@ def run_python(path: str, args: list = None, timeout: int = 30):
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
             cwd=os.path.dirname(full) or ".",
             env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0,
         )
 
         stdout = result.stdout[:8000] if result.stdout else ""

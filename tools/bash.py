@@ -12,11 +12,13 @@ import time
 import threading
 import queue
 from collections import deque
-from .registry import register_tool
+from .registry import register_tool, stable_local
 
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_ws = threading.local()
-_ctx = threading.local()   # runtime context: on_output callback, etc.
+# ⚠️ stable_local：hot_reload 会 reload 本模块，模块级 threading.local() 会被重建，
+# 正在跑的循环会丢掉工作区（cwd 基准）与输出回调。
+_ws = stable_local("bash_ws")
+_ctx = stable_local("bash_ctx")   # runtime context: on_output callback, etc.
 
 
 def set_workspace(path):
@@ -197,6 +199,7 @@ def bash(command: str, timeout: int = 120, workdir: str = "", confirm: bool = Fa
     else:
         cwd = getattr(_ws, 'path', None) or BASE_DIR
     if not os.path.isdir(cwd):
+        print(f"[bash] ⚠️ 工作区 cwd 无效，回退项目根: {cwd}（排查 set_workspace 链路）")
         cwd = BASE_DIR
     level, reasons = _check_danger(command)
     if level == 'blocked':
@@ -222,8 +225,12 @@ def bash(command: str, timeout: int = 120, workdir: str = "", confirm: bool = Fa
         actual_cmd = 'chcp 65001 >nul 2>&1 && ' + command
 
     env = {**os.environ, 'PYTHONIOENCODING': 'utf-8', 'LANG': 'en_US.UTF-8'}
-    # Windows: 用 CREATE_NEW_PROCESS_GROUP 让 taskkill /T 能 kill 整个进程树
-    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+    # Windows: CREATE_NEW_PROCESS_GROUP 让 taskkill /T 能 kill 整个进程树；
+    # CREATE_NO_WINDOW 抑制黑窗口弹出（否则每次调用都闪一下控制台，抢用户焦点）
+    creationflags = 0
+    if os.name == 'nt':
+        creationflags = (subprocess.CREATE_NEW_PROCESS_GROUP
+                         | getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000))
 
     def _kill_tree(pid):
         """Kill 整个进程树（Windows: taskkill /T /F, Unix: killpg）"""
@@ -232,6 +239,7 @@ def bash(command: str, timeout: int = 120, workdir: str = "", confirm: bool = Fa
                 subprocess.run(
                     f'taskkill /PID {pid} /T /F',
                     shell=True, capture_output=True, timeout=10,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000),
                 )
             except Exception:
                 pass

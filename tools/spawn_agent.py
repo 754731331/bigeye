@@ -127,7 +127,15 @@ def spawn_agent(steps: list, background: str = "", workspace: str = "", allow_wr
         if ws_rel:
             import sys as _sys
             ROOT_DIR = os.path.dirname(_sys.executable) if getattr(_sys, 'frozen', False) else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            workspace = os.path.join(ROOT_DIR, ws_rel.replace("/", os.sep))
+            # 与主链路同源解析：绝对/相对都先试原值，失效则回标准工作区，禁止静默拼嵌套副本
+            if os.path.isabs(ws_rel) and os.path.isdir(ws_rel):
+                workspace = ws_rel
+            else:
+                std_ws = os.path.join(ROOT_DIR, "data", "missions", parent_tid, "workspace")
+                if os.path.isdir(std_ws):
+                    workspace = std_ws
+                else:
+                    workspace = os.path.join(ROOT_DIR, ws_rel.replace("/", os.sep))
 
     results = []
     blocked_count = 0

@@ -26,7 +26,12 @@ server 用 ThreadingHTTPServer，一个请求一个线程，agent 循环与工�
 """
 import threading
 
-_local = threading.local()
+from .registry import stable_local
+
+# ⚠️ 必须用 stable_local：hot_reload 会把 tools/*.py 全部 reload，
+# 模块级 threading.local() 会被重建 → 所有在跑的循环当场丢绑定 → 串任务。
+# 详见 tools/registry.stable_local 的说明与 2026-09-24 的实证。
+_local = stable_local("task_context")
 
 
 def set_current_topic(tid):
@@ -49,10 +54,28 @@ def get_current_topic(default=None):
         from db import get_db
         tid = get_db().get_active_topic_id()
         if tid:
+            # 回落不再静默：全局活跃任务 = "用户此刻点开的任务"，和"我这条循环属于谁"
+            # 是两回事。这里出现过一次真实的串任务事故（见文件头），所以出声。
+            _warn_fallback(tid)
             return tid
     except Exception:
         pass
     return default
+
+
+def _warn_fallback(tid):
+    """回落全局活跃任务时打一条限流日志（每分钟最多一条）。"""
+    try:
+        import builtins
+        import time
+        now = time.time()
+        if now - getattr(builtins, "_dayan_ctx_fallback_at", 0.0) < 60:
+            return
+        builtins._dayan_ctx_fallback_at = now
+        print(f"[task_context] ⚠ 本线程没有任务绑定，回落到全局活跃任务 {str(tid)[:8]}"
+              f" —— 若是 agent 循环内，说明绑定被 hot_reload 或异常清掉了")
+    except Exception:
+        pass
 
 
 def clear_current_topic():
@@ -69,3 +92,13 @@ def clear_if_matches(tid):
 def has_explicit_context():
     """本线程是否显式绑定了任务（供排查/测试用）。"""
     return bool(getattr(_local, "topic_id", None))
+
+
+def explicit_topic():
+    """本线程显式绑定的任务（**不回落全局**）。无绑定返回 None。
+
+    给 agent 循环每轮自检用：`explicit_topic() != 本轮 tid` 就说明绑定丢了
+    （hot_reload 清掉）或被别的请求残留成了另一个任务（keep-alive 复用线程），
+    此时必须重建绑定，否则工具层会用错归属 —— 2026-09-24 串任务事故的根因。
+    """
+    return getattr(_local, "topic_id", None)

@@ -536,7 +536,8 @@ def main():
     try:
         if sys.platform == 'win32':
             subprocess.run(["taskkill", "/f", "/im", "ompQ.exe"],
-                           capture_output=True, timeout=5)
+                           capture_output=True, timeout=5,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000))
     except Exception:
         pass
 

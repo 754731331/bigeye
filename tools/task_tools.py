@@ -322,8 +322,10 @@ def read_topic_messages(topic_id: str, before_ts: float = None, search: str = ""
 def get_first_message():
     try:
         from db import get_db
+        from .task_context import get_current_topic
         db = get_db()
-        tid = db.get_meta("active_topic")
+        # 归属优先走任务上下文通道；全局活跃任务仅作无绑定兜底
+        tid = get_current_topic() or db.get_meta("active_topic")
         if not tid:
             return "没有活跃任务。"
         rows = db.conn.execute(

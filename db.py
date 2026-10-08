@@ -136,6 +136,119 @@ CREATE INDEX IF NOT EXISTS idx_feh_parent ON file_edit_history(parent_id);
 """
 
 
+# ─────────────────────────────────────────────────────────────
+# 回收站：删除任务的快照（追加式 jsonl）
+#   delete_topic 写 → 回收站面板读 → /api/recycle/restore 倒回 → /clear 清空
+# 三个动作共用一个路径常量，别再各算一份（2026-09-23 之前面板读的是
+# data/trash 目录，而没有任何代码往那儿写，所以回收站永远是空的）。
+# ─────────────────────────────────────────────────────────────
+BACKUP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data",
+                           "deleted_topics_backup.jsonl")
+# 追加（delete_topic）与重写（take/clear）必须互斥：否则"边删边恢复"时
+# take 的「读→重写」会把刚 append 的记录一起冲掉，那条删除就永久没有备份了。
+_RECYCLE_LOCK = threading.Lock()
+
+
+def _recycle_key(rec):
+    """快照的稳定标识（列表给前端 → 恢复时原样带回）。不含行号，删别的行不会让它失效。"""
+    try:
+        ms = int(float(rec.get("deleted_at") or 0) * 1000)
+    except Exception:
+        ms = 0
+    tid = (rec.get("topic") or {}).get("id") or "?"
+    return f"{ms}-{tid}"
+
+
+def _recycle_lines():
+    """返回 [(原始行, rec 或 None), ...]。解析不了的行必须原样留着（重写时不能丢）。"""
+    out = []
+    try:
+        if not os.path.isfile(BACKUP_PATH):
+            return out
+        with open(BACKUP_PATH, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.rstrip("\n")
+                if not s.strip():
+                    continue
+                try:
+                    rec = json.loads(s)
+                except Exception:
+                    rec = None
+                out.append((s, rec if isinstance(rec, dict) else None))
+    except Exception:
+        return []
+    return out
+
+
+def _recycle_write(lines):
+    """原子写回（临时文件 + replace）：写一半崩掉也不会把回收站弄没。"""
+    os.makedirs(os.path.dirname(BACKUP_PATH), exist_ok=True)
+    tmp = BACKUP_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for s in lines:
+            f.write(s + "\n")
+    os.replace(tmp, BACKUP_PATH)
+
+
+def recycle_items():
+    """回收站列表（新 → 旧）。dir_name 即 /api/recycle/restore 要带回来的键。"""
+    items = []
+    for _, rec in _recycle_lines():
+        if rec is None:
+            continue
+        topic = rec.get("topic") or {}
+        try:
+            dt = float(rec.get("deleted_at") or 0)
+        except Exception:
+            dt = 0.0
+        items.append({
+            "dir_name": _recycle_key(rec),
+            "topic_id": topic.get("id") or "",
+            "title": topic.get("title") or "未知任务",
+            "deleted_ts": dt,
+            # 紧凑格式（老前端按 15 位切片格式化），新前端优先用 deleted_ts
+            "deleted_at": time.strftime("%Y%m%d %H%M%S", time.localtime(dt)) if dt else "",
+            "msg_count": len(rec.get("messages") or []),
+        })
+    items.sort(key=lambda x: -(x.get("deleted_ts") or 0))
+    return items
+
+
+def recycle_take(key):
+    """取出并移除该快照。找不到、或写回失败 → None（宁可让用户重试，也不能
+    「取走了却没从回收站删掉」导致同一条被恢复两次）。"""
+    with _RECYCLE_LOCK:
+        hit, keep = None, []
+        for s, rec in _recycle_lines():
+            if hit is None and rec is not None and _recycle_key(rec) == key:
+                hit = rec
+                continue
+            keep.append(s)
+        if hit is None:
+            return None
+        try:
+            _recycle_write(keep)
+        except Exception:
+            return None
+        return hit
+
+
+def recycle_put(rec):
+    """把一条快照追加回回收站（恢复失败时的回滚，别让用户白点一次就永久丢记录）。"""
+    with _RECYCLE_LOCK:
+        os.makedirs(os.path.dirname(BACKUP_PATH), exist_ok=True)
+        with open(BACKUP_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def recycle_clear():
+    """清空回收站，返回清掉的条数。"""
+    with _RECYCLE_LOCK:
+        n = sum(1 for _, rec in _recycle_lines() if rec is not None)
+        _recycle_write([])
+        return n
+
+
 class Database:
     def __init__(self, path=DB_PATH):
         self.path = path
@@ -370,6 +483,29 @@ class Database:
         self._commit()
 
 
+    def settle_topic_usage(self, tid, settlement_id, cost, tokens):
+        """Atomically settle one usage event once, including global totals."""
+        conn = self._get_conn()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            if not conn.execute('SELECT 1 FROM topics WHERE id=?', (tid,)).fetchone():
+                raise ValueError('Unknown task')
+            cur = conn.execute('INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)',
+                               ('usage_settlement:' + settlement_id, tid))
+            if not cur.rowcount:
+                conn.rollback()
+                return False
+            conn.execute('UPDATE topics SET total_cost=total_cost+?, total_tokens=total_tokens+? WHERE id=?',
+                         (cost, tokens, tid))
+            for key, amount in [('total_cost_cny', cost), ('total_tokens', tokens)]:
+                conn.execute("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=CAST(COALESCE(value,'0') AS REAL)+?",
+                             (key, str(amount), amount))
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+
     def add_topic_cost(self, tid, cost, tokens=0):
         """Accumulate cost (USD) and tokens for a topic."""
         self._execute(
@@ -393,14 +529,60 @@ class Database:
                     "topic": dict(topic) if topic else None,
                     "messages": [dict(m) for m in msgs],
                 }
-                bak = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "deleted_topics_backup.jsonl")
-                with open(bak, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                os.makedirs(os.path.dirname(BACKUP_PATH), exist_ok=True)
+                with _RECYCLE_LOCK:
+                    with open(BACKUP_PATH, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception:
             pass  # 备份失败不阻塞删除（与旧行为一致），但正常情况都会成功
         self._execute("DELETE FROM messages WHERE topic_id=?", (tid,))
         self._execute("DELETE FROM topics WHERE id=?", (tid,))
         self._commit()
+
+    def restore_topic_snapshot(self, topic, messages):
+        """delete_topic 的逆操作：把回收站快照原样倒回库。返回恢复出的 topic_id。
+
+        **尽量保留原 message.id**：SQLite AUTOINCREMENT 不复用 id，所以被删的旧 id 必然空闲，
+        而 user_msg_vectors 是按 message_id 建的表 → 保住 id 就等于恢复后语义检索不丢。
+        若 id 区间已被占用（换过库文件之类的极端情况），整体退回自增 id 重插。
+        """
+        t = topic or {}
+        tid = t.get("id")
+        if not tid:
+            return None
+        if self._fetchone("SELECT id FROM topics WHERE id=?", (tid,)):
+            return tid  # 已在库里（重复恢复）→ 视为成功，不再插一遍
+        now = time.time()
+        self._execute(
+            "INSERT INTO topics (id, title, session_path, mission_path, created_at,"
+            " updated_at, last_message, total_cost, total_tokens) VALUES (?,?,?,?,?,?,?,?,?)",
+            (tid, t.get("title") or "新任务", t.get("session_path") or "", t.get("mission_path"),
+             t.get("created_at") or now,
+             now,  # updated_at 取现在：恢复后任务直接浮到列表最上面，不然沉在老位置找不到
+             t.get("last_message") or "", t.get("total_cost") or 0, t.get("total_tokens") or 0))
+
+        msgs = [m for m in (messages or []) if isinstance(m, dict)]
+        rows = [(tid, m.get("role") or "ai", m.get("text") or "", m.get("args"),
+                 m.get("thinking") or "", m.get("ts") or now,
+                 m.get("created_at") or m.get("ts") or now) for m in msgs]
+        ids = [m.get("id") for m in msgs]
+        keep_ids = bool(msgs) and all(isinstance(i, int) and i > 0 for i in ids)
+        if keep_ids:
+            chk = self._fetchone("SELECT COUNT(*) AS n FROM messages WHERE id BETWEEN ? AND ?",
+                                 (min(ids), max(ids)))
+            if chk and (chk["n"] or 0) > 0:
+                keep_ids = False  # 区间被占 → 别硬塞，退回自增（向量按 id 的关联会失效，仅此一种情况）
+        if keep_ids:
+            for mid, r in zip(ids, rows):
+                self._execute(
+                    "INSERT INTO messages (id, topic_id, role, text, args, thinking, ts, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)", (mid,) + r)
+        else:
+            self._executemany(
+                "INSERT INTO messages (topic_id, role, text, args, thinking, ts, created_at)"
+                " VALUES (?,?,?,?,?,?,?)", rows)
+        self._commit()
+        return tid
 
     def set_active_topic_id(self, tid):
         self._execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('active_topic', ?)", (tid,))
@@ -437,6 +619,72 @@ class Database:
         """Get a per-topic meta value."""
         row = self._fetchone("SELECT value FROM meta WHERE key=?", (f"{key}_{tid}",))
         return row["value"] if row else None
+
+    def delete_topic_meta(self, tid, key):
+        """Delete a per-topic meta key. 用于清掉旧机器残留的失效绝对路径。"""
+        self._execute("DELETE FROM meta WHERE key=?", (f"{key}_{tid}",))
+        self._commit()
+
+    def normalize_workspace_metas(self, topic_id=None, auto_fix=True):
+        """workspace 路径治理（幂等）：把 meta 里的 workspace 值规范化。
+
+        原则：标准形态 data/missions/{tid}/workspace 不存 meta，删除键让运行时
+        按 tid 现算（数据自描述，永不失效）；特殊工作区存相对路径。
+        旧机器残留的失效绝对路径：若 data/missions/{tid}/workspace 实际存在，
+        auto_fix=True 时删除键改走标准形态；否则跳过（保留原值由人工处理）。
+
+        返回 {'fixed': [...], 'skipped': [...], 'kept': n}。
+        """
+        import os as _os
+        fixed, skipped = [], []
+        kept = 0
+        keys = self.list_meta_keys(prefix="workspace_")
+        for k in keys:
+            tid = k[len("workspace_"):]
+            if topic_id and tid != topic_id:
+                continue
+            v = self.get_topic_meta(tid, "workspace")
+            if v is None:
+                continue
+            # 项目根 = db.py 所在目录
+            root = _os.path.dirname(_os.path.abspath(__file__))
+            std_rel_norm = _os.path.normpath(_os.path.join("data", "missions", tid, "workspace"))
+            std_abs_cur = _os.path.normpath(_os.path.join(root, "data", "missions", tid, "workspace"))
+            v_norm = _os.path.normpath(v) if v else ""
+            if _os.path.isabs(v):
+                if v_norm.lower() == std_abs_cur.lower():
+                    # 标准绝对路径：删键，改由运行时按 tid 现算
+                    if auto_fix:
+                        self.delete_topic_meta(tid, "workspace")
+                        fixed.append((tid, "std-abs->runtime", v))
+                    else:
+                        kept += 1
+                elif _os.path.isdir(v):
+                    kept += 1  # 存在的特殊绝对路径（用户自定）保留
+                else:
+                    if _os.path.isdir(std_abs_cur) and auto_fix:
+                        self.delete_topic_meta(tid, "workspace")
+                        fixed.append((tid, "broken-abs->runtime", v))
+                    elif auto_fix:
+                        skipped.append((tid, "broken-abs-no-dir", v))
+                    else:
+                        kept += 1
+            else:
+                if v_norm == std_rel_norm:
+                    if auto_fix:
+                        self.delete_topic_meta(tid, "workspace")
+                        fixed.append((tid, "std-rel->runtime", v))
+                    else:
+                        kept += 1
+                else:
+                    resolved = _os.path.join(root, v)
+                    if _os.path.isdir(resolved) or _os.path.isdir(v):
+                        kept += 1  # 可解析的特殊相对路径保留
+                    elif auto_fix:
+                        skipped.append((tid, "unresolvable-rel", v))
+                    else:
+                        kept += 1
+        return {"fixed": fixed, "skipped": skipped, "kept": kept}
     # ── Messages ────────────────────────────────────
 
     def add_message(self, topic_id, role, text, args=None, thinking="", ts=None):
@@ -507,13 +755,17 @@ class Database:
         self._commit()
 
     def get_messages(self, topic_id, limit=None, offset=0, skip_hidden=False, skip_process=False,
-                     exclude_thinking=False, after_ts=None):
+                     exclude_thinking=False, after_ts=None, conclusions_only=False):
         # skip_hidden: 过滤 args 含 "hidden" 的消息（organize_context 批量整理的）
         # skip_process: 过滤 args 含 "process" 的 AI 消息（工具轮动作叙述，非最终回复）
         #   过程叙述仍可通过 read_topic_messages 工具直接 SQL 翻阅，只是不进 AI 上下文和前端历史
         # exclude_thinking: 只回 has_thinking 标记，不回 thinking 正文（正文体积可达数 MB，
         #   前端首屏/轮询全带上会把"最终答复"拖到最后才出现；改为点开过程泡时按需拉）
         # after_ts: 只要该时间戳(秒)之后的消息 —— 前端增量刷新用，避免每次全量重传历史
+        # conclusions_only: 只要"人话"——用户消息 + AI 的最终回复，剔掉工具调用。
+        #   前端"结论优先"首屏用：实测同一任务 5487 条原始记录里结论仅 118 条(48KB)，
+        #   其余 5369 条是工具调用与工具轮叙述(过程明细 3.4MB)，全量传会让结论迟迟不出现。
+        #   被剔掉的过程由 get_message_sequence 算成"折叠占位"，点开时经 get_proc_range 按需拉。
         filters = []
         fargs = []
         if skip_hidden:
@@ -521,6 +773,8 @@ class Database:
         if skip_process:
             # 只过滤 AI 角色的过程叙述，tool 角色的 args 也可能含 process 字样但不影响
             filters.append("(role != 'ai' OR args NOT LIKE '%\"process\"%' OR args IS NULL)")
+        if conclusions_only:
+            filters.append("role != 'tool'")
         if after_ts is not None:
             try:
                 _ts = float(after_ts)
@@ -574,6 +828,122 @@ class Database:
             tuple([topic_id] + ids)
         )
         return {str(r["id"]): (r["thinking"] or "") for r in rows}
+
+    # ── 结论视图支持（前端"结论优先、过程懒加载"）────────────────────────
+    # 判定必须与 get_messages(skip_process=True, conclusions_only=True) 完全一致：
+    #   结论 = 非 tool 且（非 ai 或 args 不含 "process"）
+    _CONCL_CASE = ("CASE WHEN role != 'tool' AND (role != 'ai' OR args IS NULL "
+                   "OR args NOT LIKE '%\"process\"%') THEN 1 ELSE 0 END")
+
+    def get_message_sequence(self, topic_id):
+        """轻量全序列投影：[{id, c(是否结论), ts, tn(工具名)}]，不取正文只取标志位/工具名。
+        前端结论视图据此把"两条结论之间夹着的过程"折成一个占位（见 /api/messages?conclusions=1）。
+        tn 只对 role='tool' 有值。用途：占位上显示"最后一步是什么"——用户关心的是
+        "他到哪一步了/卡在哪个工具上"，而不是光一个步数。
+
+        ⚠️ 工具名必须从 args 里取（`json_extract(args,'$.name')`），不能取 text：
+        tool 行的 text 是**工具返回结果**（实测单条可达数 KB 的 JSON），
+        取它会让 3000 条工具行一次读出几 MB，且名字位显示成一大坨结果 JSON。
+        args 的形状是 {"tool_call_id":..., "name":"bash", "turn":N}。
+        """
+        rows = self._fetchall(
+            "SELECT id, ts, CASE WHEN role='tool' "
+            "THEN json_extract(args,'$.name') ELSE NULL END AS tn, "
+            + self._CONCL_CASE + " AS c FROM messages "
+            "WHERE topic_id=? ORDER BY ts, id", (topic_id,))
+        out = []
+        for r in rows:
+            ts = r["ts"]
+            if ts and ts < 1e14:
+                ts = ts * 1000
+            out.append({"id": r["id"], "c": int(r["c"] or 0), "ts": ts, "tn": r["tn"]})
+        return out
+
+    def get_topic_tail(self, topic_id):
+        """尾部探针：前端每 3 秒问一次"有没有新东西 / 最后一步是什么 / 忙不忙"。
+
+        为什么需要它：旧实现里界面的更新全靠"发消息的那条链路"和两条粗粒度定时器
+        （6s 自动同步 + 8s 任务列表）。用户原话是"他也不动，非要我切来切去才动一下"——
+        因为切任务会强制走一次拉取，而原地干等没有任何东西会来刷新。
+
+        全部走 (topic_id, ts) 索引的倒序 seek，不取正文：不返回消息内容，
+        只回 4 个判据 + 最后一步工具名。判据用 id 而不是 ts：id 单调递增，
+        不会因时钟回拨/同秒并列而误判"没变化"。
+
+        返回：
+          last_id / last_ts      最后一条消息（任何角色）
+          count                  该任务消息总数
+          last_step / last_step_ts   最后一个工具调用的名字与时刻（"他做到哪一步了"）
+          last_concl_id              最后一条"结论"（人话）的 id
+        """
+        out = {"last_id": 0, "last_ts": 0, "count": 0,
+               "last_step": "", "last_step_ts": 0, "last_concl_id": 0}
+        r = self._fetchone(
+            "SELECT id, ts FROM messages WHERE topic_id=? ORDER BY ts DESC, id DESC LIMIT 1",
+            (topic_id,))
+        if not r:
+            return out
+        ts = r["ts"]
+        if ts and ts < 1e14:
+            ts = ts * 1000
+        out["last_id"] = r["id"] or 0
+        out["last_ts"] = ts or 0
+        cnt = self._fetchone("SELECT COUNT(*) AS n FROM messages WHERE topic_id=?", (topic_id,))
+        out["count"] = (cnt["n"] if cnt else 0) or 0
+        t = self._fetchone(
+            "SELECT id, json_extract(args,'$.name') AS nm, ts FROM messages "
+            "WHERE topic_id=? AND role='tool' ORDER BY ts DESC, id DESC LIMIT 1", (topic_id,))
+        if t:
+            out["last_step"] = t["nm"] or ""
+            _tts = t["ts"]
+            if _tts and _tts < 1e14:
+                _tts = _tts * 1000
+            out["last_step_ts"] = _tts or 0
+        c = self._fetchone(
+            "SELECT id FROM messages WHERE topic_id=? AND " + self._CONCL_CASE + "=1 "
+            "ORDER BY ts DESC, id DESC LIMIT 1", (topic_id,))
+        if c:
+            out["last_concl_id"] = c["id"] or 0
+        return out
+
+    def get_proc_range(self, topic_id, from_id, to_id):
+        """按 id 区间取"过程明细"（工具调用 + 工具轮动作叙述），供前端点开折叠占位时懒加载。
+        返回结构与 get_messages 同构，前端复用同一套解析（_mapServerMsgs + groupProcess）。
+        to_id=0/空 = 开到末尾（任务尾部那段"还没收尾"的过程，占位就是这么标的）。"""
+        if int(to_id or 0) > 0:
+            _cond = "id>? AND id<=?"
+            _args = (topic_id, int(from_id or 0), int(to_id))
+        else:
+            _cond = "id>?"
+            _args = (topic_id, int(from_id or 0))
+        rows = self._fetchall(
+            "SELECT id, topic_id, role, text, args, ts FROM messages "
+            "WHERE topic_id=? AND " + _cond + " "
+            "AND (role='tool' OR (role='ai' AND args LIKE '%\"process\"%')) "
+            "ORDER BY ts, id", _args)
+        result = []
+        for r in rows:
+            ts = r["ts"]
+            if ts and ts < 1e14:
+                ts = ts * 1000
+            m = {"role": r["role"], "text": r["text"], "timestamp": ts, "id": r["id"]}
+            if r["role"] == "tool":
+                m["type"] = "tool"
+                m["name"] = r["text"]
+            try:
+                m["args"] = json.loads(r["args"]) if r["args"] else None
+            except json.JSONDecodeError:
+                m["args"] = None
+            if r["role"] == "ai":
+                m["has_thinking"] = True   # 正文仍走 /api/message-thinking 点开才拉
+            result.append(m)
+        return result
+
+    def last_message_id(self, topic_id):
+        """该任务最后一条消息的 id（判定"有没有新东西"用，走索引倒序 seek）。"""
+        r = self._fetchone(
+            "SELECT id FROM messages WHERE topic_id=? ORDER BY ts DESC, id DESC LIMIT 1", (topic_id,))
+        return (r["id"] or 0) if r else 0
 
     def message_count(self, topic_id):
         row = self._fetchone("SELECT COUNT(*) as cnt FROM messages WHERE topic_id=?", (topic_id,))

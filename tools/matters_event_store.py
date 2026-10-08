@@ -19,8 +19,12 @@ import threading
 import time
 
 from db import get_db
+from .registry import stable_state
 
-_lock = threading.RLock()
+# ⚠️ stable_state：hot_reload 会 reload 本模块，模块级 RLock 被重建 → 出现两把锁，
+# 两个线程可同时跑"读事件流 → 算 seq → 追加"（本模块的 seq 是读-改-写，不是原子
+# 自增），并发时会产生重复 seq 或丢事件。对象挂 builtins 上，跨 reload 稳定。
+_lock = stable_state("matters_event_lock", threading.RLock)
 
 EVENTS_KEY = "matters_events"        # [{...事件...}]
 SNAPSHOT_KEY = "matters_snapshot"    # {"upto_seq": n, "global": [...], "tasks": {tid: [...]}}

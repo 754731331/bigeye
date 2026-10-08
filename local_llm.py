@@ -63,16 +63,78 @@ DEFAULT_CONFIG = {
     "extra_args": [],
     # 拉起后等待就绪的上限（秒）；27B 首次加载含从磁盘读 15GB+ 权重
     "start_timeout": 240,
+    # 多模型槽位（2026-09-24）：profiles 数组 + active_profile 指向当前槽。
+    # get_config() 返回「激活槽参数 + 全局默认值」的合成结果，下游 probe/start/
+    # _build_cmd 完全不感知 profile 的存在（零改动复用）。
+    "active_profile": "qwen3.8-27b",
+    "profiles": [
+        {
+            "name": "qwen3.8-27b",
+            "display": "Qwen3.8 27B (Local GPU)",
+            "model_id": "qwen3.8-27b-iq4xs",
+            "port": 8901,
+            "exe": "",
+            "model_path": "",
+            "mmproj": "",
+            "ctx_size": 32000,
+            "threads": 8,
+            "gpu_layers": 999,
+            "extra_args": [],
+            "start_timeout": 240,
+        },
+        {
+            "name": "bonsai27b",
+            "display": "Ternary-Bonsai-2-27B (三进制 35tok/s)",
+            "model_id": "bonsai27b-ptq1",
+            "port": 8080,
+            "exe": "E:\\AI\\llama-prism\\engine\\llama-server.exe",
+            "model_path": "E:\\AI\\bonsai27b\\Ternary-Bonsai-2-27B-PTQ1_0.gguf",
+            "mmproj": "E:\\AI\\bonsai27b\\Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+            "ctx_size": 32768,
+            "threads": 8,
+            "gpu_layers": 999,
+            "extra_args": [],
+            "start_timeout": 120,
+        },
+        {
+            # NInfer 引擎：DFlash2 投机解码实测 108.5 tok/s（llama.cpp 的 3 倍）。
+            # provider="ninfer" 让 probe/_build_cmd/stop 走 ninfer-serve 分支；
+            # model_path 是 .ninfer 工件（非 GGUF），kv_dtype/spec 是 NInfer 特有参数。
+            "name": "bonsai-ninfer",
+            "display": "Bonsai-2-27B NInfer (DFlash2 ~108tok/s)",
+            "provider": "ninfer",
+            "model_id": "bonsai27b-ninfer",
+            "port": 8905,
+            "exe": "E:\\AI\\ninfer-master-build\\apps\\ninfer-serve.exe",
+            "model_path": "E:\\AI\\models\\Ternary-Bonsai-2-27B-ninfer-v3.ninfer",
+            "mmproj": "",
+            "ctx_size": 32768,
+            "threads": 8,
+            "gpu_layers": 999,
+            "kv_dtype": "rk8v4",
+            "gdn_state_fp16": True,
+            "spec": "dflash2",
+            "draft_tokens": 7,
+            "extra_args": [],
+            "start_timeout": 180,
+        },
+    ],
     # Ollama（只做探活，不做拉起）
     "ollama_port": 11434,
 }
 
 _PROBE_TTL = 5.0        # 探活结果缓存（秒）：够短以支撑进度轮询，够长以合并并发请求
+# 「没在跑」的缓存要长得多：服务不在时状态不会自己变，而每次重探都要等满
+# _HTTP_TIMEOUT（实测 2.0s —— 本机 llama.cpp 端口没人听时是 timeout 而不是
+# connection refused）。模型面板打开慢、切任务时"卡一下"就是这个超时被反复付。
+# 所有会改变状态的入口（start/stop/activate/save_config）都会 _invalidate()，
+# 设置页的刷新走 status(force=True)，所以延长这里不会让状态变"假"。
+_PROBE_TTL_DOWN = 30.0  # 探活失败/未运行时的缓存秒数
 _HTTP_TIMEOUT = 2.0     # 单次探活超时（秒）
 _LOG_NAME = "local_llm.log"
 
 _lock = threading.RLock()
-_cache: dict = {"at": 0.0, "value": None}
+_cache: dict = {"at": 0.0, "value": None, "ttl": _PROBE_TTL}
 _spawn: dict = {}       # {"pid": int, "proc": Popen, "at": float, "cmd": [..]}
 _root: str = os.path.dirname(os.path.abspath(__file__))
 _config_path: str = os.path.join(_root, "model_config.json")
@@ -118,6 +180,23 @@ def get_config() -> dict:
                     cfg[k] = v
     except Exception:
         pass
+    # 多槽位合成（2026-09-24）：active_profile 指向 profiles 里的一槽，
+    # 槽内非空字段覆盖全局值 —— 槽里留空表示“用全局/用户配置的值”。
+    # 必须在类型归一之前完成覆盖，归一只认 int，覆盖后统一处理。
+    profs = cfg.get("profiles") or []
+    if isinstance(profs, list) and profs:
+        act = str(cfg.get("active_profile") or "").strip()
+        slot = next((p for p in profs
+                     if isinstance(p, dict) and str(p.get("name") or "") == act), None)
+        if slot is None:
+            slot = profs[0] if isinstance(profs[0], dict) else None
+        if slot:
+            for k, v in slot.items():
+                if k in ("name", "display", "profiles"):
+                    continue
+                if v is None or v == "":
+                    continue
+                cfg[k] = v
     # 类型归一：JSON 里可能存成字符串
     for k in ("port", "ctx_size", "threads", "gpu_layers", "start_timeout", "ollama_port"):
         try:
@@ -151,13 +230,83 @@ def save_config(updates: dict) -> dict:
     return {"ok": True, "config": get_config()}
 
 
+def _profiles_raw(raw: dict) -> list:
+    """model_config.json 里已存的 profiles 列表（可能不存在）。"""
+    ll = raw.get("local_llm") or {}
+    p = ll.get("profiles")
+    return p if isinstance(p, list) else []
+
+
+def list_profiles() -> dict:
+    """列出所有本地模型槽位及激活状态（激活槽附真实运行状态）。"""
+    cfg = get_config()
+    profs = [p for p in (cfg.get("profiles") or []) if isinstance(p, dict)]
+    act = str(cfg.get("active_profile") or "")
+    if not act and profs:
+        act = str(profs[0].get("name") or "")
+    out = []
+    for p in profs:
+        name = str(p.get("name") or "")
+        entry = {
+            "name": name,
+            "display": str(p.get("display") or name),
+            "model_id": str(p.get("model_id") or ""),
+            "model_path": str(p.get("model_path") or ""),
+            "port": int(p.get("port") or 0),
+            "active": name == act,
+            "configured": bool(str(p.get("model_path") or "").strip()),
+            "running": False,
+            "starting": False,
+        }
+        if entry["active"]:
+            # 只有激活槽才真实探活（未激活端口可能根本没服务，探了也误导）
+            st = probe()
+            entry["running"] = bool(st.get("running"))
+            entry["starting"] = bool(st.get("starting"))
+        out.append(entry)
+    return {"ok": True, "active": act, "profiles": out}
+
+
+def activate(name: str) -> dict:
+    """切换激活槽位：只改 local_llm.active_profile，其它段原样保留。
+
+    切换后 get_config()/probe()/start()/base_url() 全部走新槽参数。
+    旧槽服务进程不在此处杀（不同槽端口不同互不冲突，是否停旧由调用方决定）。
+    """
+    name = str(name or "").strip()
+    if not name:
+        return {"ok": False, "error": "profile name required"}
+    raw = {}
+    try:
+        if os.path.exists(_config_path):
+            with open(_config_path, "r", encoding="utf-8") as f:
+                raw = json.load(f) or {}
+    except Exception:
+        raw = {}
+    names = [str(p.get("name") or "") for p in _profiles_raw(raw) if isinstance(p, dict)]
+    if name not in names:
+        return {"ok": False, "error": f"unknown profile: {name}", "known": names}
+    cur = raw.get("local_llm") or {}
+    already = str(cur.get("active_profile") or "") == name
+    cur["active_profile"] = name
+    raw["local_llm"] = cur
+    try:
+        with open(_config_path, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        return {"ok": False, "error": f"写入配置失败: {e}"}
+    _invalidate()
+    return {"ok": True, "already": already, "active": name,
+            "profiles": list_profiles().get("profiles")}
+
+
 def base_url(cfg: dict | None = None) -> str:
     cfg = cfg or get_config()
     return f"http://{cfg['host']}:{cfg['port']}/v1"
 
 
 def is_local_model(model_id: str) -> bool:
-    """该 model_id 是否指向本地 llama.cpp 服务（配置里的 id / 路径名 / 前缀）。"""
+    """该 model_id 是否指向本地 llama.cpp 服务（激活槽/任意槽位的 id、路径名、前缀）。"""
     if not model_id:
         return False
     mid = str(model_id).lower().strip()
@@ -170,7 +319,27 @@ def is_local_model(model_id: str) -> bool:
             return True
     except Exception:
         pass
-    return mid.startswith("qwen3.8")
+    for p in (cfg.get("profiles") or []):
+        if not isinstance(p, dict):
+            continue
+        if mid == str(p.get("model_id") or "").lower():
+            return True
+        pb = os.path.basename(str(p.get("model_path") or "")).lower()
+        if pb and mid == pb:
+            return True
+    return mid.startswith("qwen3.8") or mid.startswith("bonsai27b")
+
+
+def resolve_profile(model_id: str) -> str:
+    """model_id → profile 名；不匹配任何槽位时返回空串（含已是激活槽的情况）。"""
+    if not model_id:
+        return ""
+    mid = str(model_id).lower().strip()
+    cfg = get_config()
+    for p in (cfg.get("profiles") or []):
+        if isinstance(p, dict) and mid == str(p.get("model_id") or "").lower():
+            return str(p.get("name") or "")
+    return ""
 
 
 # ── 视觉（mmproj）解析 ──────────────────────────────
@@ -260,7 +429,7 @@ def probe(force: bool = False) -> dict:
     """
     now = time.time()
     with _lock:
-        if not force and _cache["value"] is not None and (now - _cache["at"]) < _PROBE_TTL:
+        if not force and _cache["value"] is not None and (now - _cache["at"]) < _cache.get("ttl", _PROBE_TTL):
             return dict(_cache["value"])
 
     cfg = get_config()
@@ -331,6 +500,32 @@ def probe(force: bool = False) -> dict:
             info["starting"] = True
             info["pid"] = _spawn.get("pid")
 
+    elif cfg["provider"] == "ninfer":
+        # ninfer-serve 有 /health（200 ok / 503 unavailable）但没有 /props。
+        # live_ctx 直接用配置值（--max-context 启动参数，运行中不变），
+        # 视觉暂不支持（ninfer-serve 的 media 接口与 llama.cpp mmproj 不同）。
+        root = f"http://{cfg['host']}:{cfg['port']}"
+        try:
+            h = _get_json(f"{root}/health")
+            status = str((h or {}).get("status", "")).lower()
+            if status == "ok":
+                info["running"] = True
+                info["live_ctx"] = int(cfg["ctx_size"]) or None
+            elif status:
+                info["starting"] = True
+                info["error"] = status
+        except urllib.error.HTTPError as e:
+            if e.code == 503:
+                info["starting"] = True
+                info["error"] = "model loading"
+            else:
+                info["error"] = f"HTTP {e.code}"
+        except Exception as e:
+            info["error"] = str(e)
+        if not info["running"] and _spawn_alive():
+            info["starting"] = True
+            info["pid"] = _spawn.get("pid")
+
     elif cfg["provider"] == "ollama":
         try:
             _get_json(f"http://{cfg['host']}:{cfg['ollama_port']}/api/tags")
@@ -338,9 +533,12 @@ def probe(force: bool = False) -> dict:
         except Exception as e:
             info["error"] = str(e)
 
+    _alive = bool(info.get("running") or info.get("starting"))
     with _lock:
         _cache["at"] = time.time()
         _cache["value"] = dict(info)
+        # 在跑/正在起：短 TTL（进度轮询要看变化）；没在跑：长 TTL（状态不会自己变）
+        _cache["ttl"] = _PROBE_TTL if _alive else _PROBE_TTL_DOWN
     return dict(info)
 
 
@@ -423,6 +621,32 @@ def log_tail(max_chars: int = 1200) -> str:
 
 def _build_cmd(cfg: dict) -> list:
     exe = str(cfg["exe"])
+    if str(cfg.get("provider") or "") == "ninfer":
+        # ninfer-serve.exe <model.ninfer> [flags]：位置参数是模型文件，
+        # 其余都是命名参数。无 --ctx-size/--threads/--n-gpu-layers/--alias/--jinja。
+        args = [
+            exe,
+            str(cfg["model_path"]),
+            "--host", str(cfg["host"]),
+            "--port", str(cfg["port"]),
+            "--model-id", str(cfg["model_id"]),
+            "--max-context", str(cfg["ctx_size"]),
+            "--kv-dtype", str(cfg.get("kv_dtype") or "rk8v4"),
+        ]
+        if cfg.get("gdn_state_fp16"):
+            args.append("--gdn-state-fp16")
+        spec = str(cfg.get("spec") or "").strip()
+        if spec:
+            args += ["--spec", spec]
+            dt = cfg.get("draft_tokens")
+            if dt:
+                args += ["--draft-tokens", str(dt)]
+        extra = cfg.get("extra_args") or []
+        if isinstance(extra, list):
+            args += [str(a) for a in extra]
+        if exe.lower().endswith((".cmd", ".bat")):
+            return ["cmd", "/c"] + args
+        return args
     args = [
         exe,
         "-m", str(cfg["model_path"]),
@@ -475,6 +699,10 @@ def start() -> dict:
         _vision_warning = f"配置的视觉投影文件不存在，将以纯文本模式启动：{_explicit_mp}"
 
     cmd = _build_cmd(cfg)
+    env = os.environ.copy()
+    env.update({str(k): str(v) for k, v in (cfg.get('env') or {}).items()})
+    exe_dir = os.path.dirname(exe)
+    env['PATH'] = os.pathsep.join([exe_dir, os.path.join(exe_dir, 'x64'), env.get('PATH', '')])
     log_path = _log_path()
     try:
         with open(log_path, "a", encoding="utf-8") as lf:
@@ -484,6 +712,7 @@ def start() -> dict:
             proc = subprocess.Popen(
                 cmd,
                 cwd=os.path.dirname(exe) or None,
+                env=env,
                 stdout=lf, stderr=lf,
                 stdin=subprocess.DEVNULL,
                 **_no_window_kwargs(),
@@ -506,13 +735,18 @@ def start() -> dict:
             "cmd": " ".join(cmd)}
 
 
-def stop() -> dict:
-    """停止本端口的 llama-server（只杀进程名含 llama 的，避免误伤）。"""
+def stop(port: int | None = None) -> dict:
+    """停止指定端口的 llama-server（只杀进程名含 llama 的，避免误伤）。
+
+    port 为空时停激活槽端口 —— 与多槽位之前的旧行为兼容。
+    多槽位切换时用它停旧槽，释放显存（16G 卡装不下两个 27B）。
+    """
     cfg = get_config()
+    _port = int(port) if port else int(cfg["port"])
     killed, skipped = [], []
-    for pid in _port_pids(cfg["port"]):
+    for pid in _port_pids(_port):
         name = _proc_name(pid)
-        if "llama" not in (name or "").lower():
+        if "llama" not in (name or "").lower() and "ninfer" not in (name or "").lower():
             skipped.append({"pid": pid, "name": name})
             continue
         try:

@@ -17,7 +17,10 @@
 """
 import threading
 
-_session = threading.local()
+from .registry import stable_local
+
+# ⚠️ stable_local：hot_reload 会 reload 本模块，模块级 threading.local() 会被重建。
+_session = stable_local("crystal_session")
 
 
 def set_session(path: str, slice_ids: list, source_type: str = ""):

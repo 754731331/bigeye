@@ -7,7 +7,7 @@ Hermes-style lessons applied (no paid APIs):
 - honest failure: distinguish "no results" from "all engines failed"
 """
 import json, re, threading, time, urllib.request, urllib.parse
-from .registry import register_tool
+from .registry import register_tool, stable_state
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 BING_CDN_DOMAINS = ("r.bing.com", "th.bing.com", "www.bing.com")
@@ -149,11 +149,12 @@ def _search_one(engine: str, q: str, n: int):
     return None, "page fetched but no results parsed"
 
 # ---------------------------------------------------------------- cache + single-flight
-
-_cache: dict[str, tuple[float, list]] = {}
-_cache_lock = threading.Lock()
-_inflight: dict[str, threading.Lock] = {}
-_inflight_guard = threading.Lock()
+# ⚠️ stable_state：hot_reload 会 reload 本模块，缓存/锁/单飞表若被重建，会把同一份
+# 状态拆到两把锁下（dict 并发读写报错），单飞也会失守（同 key 跑两个请求）。
+_cache = stable_state("web_search_cache", dict)
+_cache_lock = stable_state("web_search_cache_lock", threading.Lock)
+_inflight = stable_state("web_search_inflight", dict)
+_inflight_guard = stable_state("web_search_inflight_guard", threading.Lock)
 
 def _cache_key(q: str, n: int) -> str:
     return f"{q.strip().lower()}|{n}"

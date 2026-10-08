@@ -10,6 +10,58 @@ import traceback
 _tools = {}  # name -> {"fn": callable, "definition": dict}
 
 
+def stable_local(key):
+    """取一个跨 importlib.reload 稳定的 threading.local。
+
+    【为什么要有这个函数】hot_reload 工具会把 tools/*.py 全部 importlib.reload
+    （registry.py 除外）。模块级的 `_x = threading.local()` 会被**重新构造**成一个
+    空对象，于是所有正在跑的 agent 循环当场丢失运行时绑定：
+      - tools/task_context.py 的 _local  ← "我在哪个任务"
+      - tools/file_tools.py / bash.py 的 _ws ← 工作区（相对路径基准）
+    绑定一没，工具层就回落到全局活跃任务（= 用户此刻点开的那个任务），
+    于是 A 任务里的 agent 开始替 B 任务干活、消息却仍写进 A —— "串任务"。
+
+    【实证】2026-09-24 19:26 / 19:27 屏蔽命令行黑窗任务（3929e044）连调两次
+    hot_reload → 18:57 起就在跑的进销存任务（b8a14f32）当场丢绑定 → 19:41 它的
+    current_topic 报出另一个任务（fe65d696 核实bonsai27b），此后 1h50m 跑去做了
+    视频任务的活，结论全落进进销存任务的对话里。
+
+    【做法】对象挂在 builtins 上：reload 只重建模块级名字，不会重建它。
+    """
+    import builtins
+    import threading
+    name = "_dayan_rtlocal_" + key
+    obj = getattr(builtins, name, None)
+    if obj is None:
+        obj = threading.local()
+        setattr(builtins, name, obj)
+    return obj
+
+
+def stable_state(key, factory):
+    """取一个跨 importlib.reload 稳定的**进程级**单例。
+
+    与 stable_local 是同一病根的另一半：模块级的进程态（dict / Lock / 计数器）
+    在 reload 时同样会被重新构造。已实证的高危项：
+
+      - tools/ask_user.py 的 _PENDING / _SEQ / _LOCK
+        正在等用户回答的 agent 循环手里攥着旧 entry 的 event（wait 不受影响），
+        但前端提交答案时 submit_answer 去**新** _PENDING 里找 → 找不到 →
+        答案永远送不到，卡片消失、循环白等满 5 分钟才降级。
+      - tools/canvas.py 的 _SAVE_LOCK：reload 后出现两把锁，
+        两个线程可同时写 canvas.json。
+
+    factory 只在首次创建时调用；之后（含 reload 后）一律返回同一对象。
+    """
+    import builtins
+    name = "_dayan_rtstate_" + key
+    obj = getattr(builtins, name, None)
+    if obj is None:
+        obj = factory()
+        setattr(builtins, name, obj)
+    return obj
+
+
 def register_tool(name, description, parameters=None, label=None):
     """Decorator to register a tool that AI can call.
 
@@ -124,6 +176,8 @@ PROTECTED_TOOLS = {
 SCENE_TOOLS = {
     "list_topics", "start_node", "complete_node", "finish_task",
     "trace_memory", "remember_knowledge", "add_mindmap_node",
+    "canvas_layout", "canvas_add_window", "canvas_update_window",
+    "canvas_remove_window", "mindmap_add_node",
 }
 
 # 折叠分组：group_name -> {description, tools: [tool_names]}

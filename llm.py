@@ -44,6 +44,41 @@ def is_transient_conn_error(e):
     return any(m in s for m in TRANSIENT_MARKERS)
 
 
+# ── 服务端侧可重试故障（非网络断连，但同样值得重试）──
+# 2026-09-25 补：聚合网关会间歇性返回
+#   HTTP 503 {"code":"model_not_found","message":"分组 default 下模型 X 无可用渠道（distributor）"}
+# 这类错原**不在** TRANSIENT_MARKERS 里 → 上层判"非瞬时" → 立刻 raise 干掉整个 agent loop，
+# 表现就是"任务说着说着就断了，也没有任何提示"。实测同一模型约 1 分钟后恢复 200
+# （渠道池临时枯竭），属明确可重试。
+RETRYABLE_SERVER_MARKERS = (
+    "http 500", "http 502", "http 503", "http 504",
+    "internal server error", "bad gateway", "service unavailable",
+    "gateway timeout", "gateway time-out",
+    "upstream",                       # 网关/上游连不上（如本地模型没拉起）
+    "no available channel", "无可用渠道",
+    "overloaded", "engine_overloaded", "server is busy",
+    "http 429", "rate limit", "too many requests",
+)
+
+# 明确**不可**重试：余额/额度类。重试无意义，必须换源或直接告知用户。
+_FATAL_QUOTA_MARKERS = ("insufficient", "quota", "余额", "balance",
+                        "invalid api key", "unauthorized", "http 401", "http 403")
+
+
+def is_retryable_llm_error(e):
+    """这个 LLM 错误是否值得原样重试一轮。
+
+    可重试 = 网络层瞬时故障 + 服务端 5xx / 限流 / 渠道临时枯竭。
+    不可重试 = 余额不足、额度超限、鉴权失败（重试只是浪费时间，应换源）。
+    """
+    s = str(e).lower()
+    if any(m in s for m in _FATAL_QUOTA_MARKERS):
+        return False
+    if any(m in s for m in TRANSIENT_MARKERS):
+        return True
+    return any(m in s for m in RETRYABLE_SERVER_MARKERS)
+
+
 class LLMError(Exception):
     pass
 
@@ -53,7 +88,7 @@ class LLMConfig:
     def __init__(self, provider="deepseek", model="deepseek-chat",
                  base_url="https://api.deepseek.com", api_key="",
                  max_tokens=8192, fallback_chain=None,
-                 protocol="openai", extra_headers=None):
+                 protocol="openai", extra_headers=None, extra_body=None):
         self.provider = provider
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -63,6 +98,8 @@ class LLMConfig:
         # 第三方源：协议（openai / anthropic）与该站点要求的额外请求头
         self.protocol = (protocol or "openai").lower()
         self.extra_headers = dict(extra_headers or {})
+        # 源级附加请求体参数（如 {"enable_thinking": true}）—— 见 chat_stream 内注释
+        self.extra_body = dict(extra_body or {})
 
     @classmethod
     def from_config(cls, path="model_config.json"):
@@ -78,6 +115,7 @@ class LLMConfig:
         fallback = cfg.get("fallback_chain", [])
         protocol = cfg.get("protocol", "openai")
         extra_headers = cfg.get("extra_headers") or {}
+        extra_body = cfg.get("extra_body") or {}
         # 当前 provider 是第三方源时，以 custom_providers 里的登记值为准 ——
         # 用户在设置页改完地址/协议，即使没重新切换模型也应该立刻生效
         try:
@@ -88,12 +126,14 @@ class LLMConfig:
                 api_key = rt["api_key"] or api_key
                 protocol = rt["protocol"] or protocol
                 extra_headers = rt["extra_headers"] or extra_headers
+                # extra_body 以源上的配置为准（源里没配才回落到顶层）
+                extra_body = rt.get("extra_body") or extra_body
         except Exception:
             pass
         return cls(provider=provider, model=model, base_url=base_url,
                    api_key=api_key, max_tokens=max_tokens,
                    fallback_chain=fallback, protocol=protocol,
-                   extra_headers=extra_headers)
+                   extra_headers=extra_headers, extra_body=extra_body)
 
     def to_dict(self):
         return {
@@ -792,6 +832,42 @@ def _chat_stream_anthropic(config, messages, tools=None, cancel_event=None, veri
 
 
 def chat_stream(config, messages, tools=None, cancel_event=None, verify_ssl=True):
+    if config.provider not in ('llamacpp', 'ninfer'):
+        yield from _chat_stream_impl(config, messages, tools, cancel_event, verify_ssl)
+        return
+    import local_llm
+    # One GPU: keep profile activation and generation atomic across topics.
+    with _local_generation_lock:
+        try:
+            profile = local_llm.resolve_profile(config.model)
+            if not profile:
+                raise RuntimeError(f'本地模型未配置槽位: {config.model}')
+            old = local_llm.get_config()
+            if old.get('active_profile') != profile:
+                stopped = local_llm.stop(old.get('port'))
+                if not stopped.get('ok'):
+                    raise RuntimeError(str(stopped))
+                activated = local_llm.activate(profile)
+                if not activated.get('ok'):
+                    raise RuntimeError(str(activated))
+            started = local_llm.start()
+            if not started.get('ok'):
+                raise RuntimeError(str(started))
+            ready = local_llm.wait_ready()
+            if not ready.get('running'):
+                raise RuntimeError('本地模型启动未就绪: ' + local_llm.log_tail())
+            config = config.clone_with(base_url=local_llm.base_url(), api_key='')
+        except Exception as exc:
+            yield {'type': 'error', 'error': str(exc)}
+            return
+        yield from _chat_stream_impl(config, messages, tools, cancel_event, verify_ssl)
+
+
+import threading as _local_threading
+_local_generation_lock = _local_threading.RLock()
+
+
+def _chat_stream_impl(config, messages, tools=None, cancel_event=None, verify_ssl=True):
     """
     Stream a chat completion from the LLM API.
     Yields dicts: {"type": EVENT_THINKING_DELTA|TEXT_DELTA|TOOL_CALL|DONE|ERROR, ...}
@@ -837,6 +913,14 @@ def chat_stream(config, messages, tools=None, cancel_event=None, verify_ssl=True
         body["tools"] = tool_spec
         body["tool_choice"] = "auto"
     body["stream_options"] = {"include_usage": True}
+    # ── 源级附加请求体参数（如 {"enable_thinking": true}）──
+    # 推理开关是各家自创的、且**默认关**：同一份权重在硅基流动上裸调用不吐
+    # reasoning_content，加 {"enable_thinking": true} 才吐（实测 DeepSeek-V4-Flash
+    # 0 字 → 554 字，且裸调用会答错"9.11 和 9.9 哪个大"）。字段名各家不同
+    # （chat_template_kwargs / thinking.type / reasoning_effort），所以由源配置决定，
+    # 这里只负责原样带上。放在最后合并 = 允许源配置里覆盖上面的默认值。
+    for _k, _v in (getattr(config, "extra_body", None) or {}).items():
+        body[_k] = _v
 
     # ── Log raw request before sending ──
     log_group = _log_raw_request(url, body, config)

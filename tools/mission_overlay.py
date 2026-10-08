@@ -25,8 +25,11 @@ if _root not in sys.path:
 
 from db import get_db
 from tools import matters_event_store as evstore
+from .registry import stable_state
 
-_matters_lock = threading.RLock()
+# ⚠️ stable_state：hot_reload 会 reload 本模块，模块级 RLock 被重建 → 出现两把锁，
+# 两个线程可同时读-改-写同一份事项分段/写缓冲（meta JSON 覆写），后写的覆盖先写的。
+_matters_lock = stable_state("mission_overlay_matters_lock", threading.RLock)
 
 TASK_KEY = "important_matters_task_"
 PENDING_KEY = "mission_overlay_pending_"

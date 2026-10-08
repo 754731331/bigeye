@@ -5,6 +5,7 @@ import sys
 import os
 import time
 import uuid
+import threading
 
 
 # Ensure project root is on path for absolute imports
@@ -382,9 +383,18 @@ def finish_task(task_id: str, status: str = "done", reason: str = ""):
             executor.finish_task()
         else:
             executor.fail_task(reason)
-
         # Reflect and sediment
         sedi = reflect_and_sediment(executor)
+        # ── JitRL 借鉴：坑指纹优势标注（2026-10-06 补工具收尾路径，与 server.py /api/task/finish 同款钩子）──
+        # 开关关=不发起任何 LLM 调用（零额外 token）；异步线程跑，不拖慢收尾返回。
+        try:
+            from tools.task_advantage import score_task, is_enabled
+            if is_enabled():
+                threading.Thread(target=score_task, args=(task_id,),
+                                 daemon=True, name="task-advantage").start()
+        except Exception as _adv_e:
+            print(f"[task_advantage] 收尾钩子异常(不影响收尾): {_adv_e}")
+        # Persist DAG to mission folder
         # 任务收尾：合并本任务的挂起写缓冲（改/删已审过，此处按规则落地）
         overlay_report = None
         try:

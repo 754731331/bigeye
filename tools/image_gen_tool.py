@@ -3,9 +3,10 @@
 import os
 import sys
 import threading
-from .registry import register_tool
+from .registry import register_tool, stable_local
 
-_ws = threading.local()
+# ⚠️ stable_local：hot_reload 会 reload 本模块，模块级 threading.local() 会被重建。
+_ws = stable_local("image_gen_ws")
 
 
 def set_workspace(path):

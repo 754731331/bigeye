@@ -4,10 +4,12 @@ import os
 import re
 import sys
 import threading
-from .registry import register_tool
+from .registry import register_tool, stable_local
 
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_ws = threading.local()
+# ⚠️ stable_local：hot_reload 会 reload 本模块，模块级 threading.local() 会被重建，
+# 正在跑的循环会丢掉工作区 → 相对路径退回进程 CWD（2026-09-24 实证）。
+_ws = stable_local("file_tools_ws")
 
 
 def set_workspace(path):

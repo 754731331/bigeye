@@ -16,6 +16,9 @@ from typing import List
 
 from ..core import SearchEngine, SearchResult, register_engine
 
+# Windows 下不弹黑窗：本进程跑在 pythonw 里，每次调 es.exe 都闪一下控制台很扰人
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
+
 
 class EverythingEngine(SearchEngine):
     """Everything es.exe 搜索引擎。"""
@@ -60,6 +63,7 @@ class EverythingEngine(SearchEngine):
                 capture_output=True,
                 text=True,
                 timeout=10,
+                creationflags=_NO_WINDOW,
             )
             if r.returncode == 0 and r.stdout.strip():
                 return r.stdout
@@ -142,6 +146,7 @@ class EverythingEngine(SearchEngine):
             r = subprocess.run(
                 [self._es_path, "-?"],
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=3,
+                creationflags=_NO_WINDOW,
             )
             return r.returncode == 0
         except Exception:

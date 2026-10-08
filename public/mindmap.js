@@ -9,7 +9,8 @@ var _MM_BTN_MM_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor
 var _MM_BTN_FB_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
 function _setMindMapBtn(label, iconSvg) {
   var btn = document.getElementById('fbMindMapBtn');
-  if (!btn) return;
+  if (!btn) return;  // 视图切换按钮已随标签栏上线退役
+  if (!label) return;
   var lb = btn.querySelector('.fb-btn-label');
   if (lb) lb.textContent = label; else btn.textContent = label;
   var sv = btn.querySelector('svg');
@@ -131,6 +132,8 @@ function mmWrap(t) {
 
 // 文件管理视图的子元素 ID（切换时统一隐藏/显示）
 var _FB_FILE_ELEMENTS = ['fbActionBar', 'fbXferPanel', 'fbWorkspace', 'fbBreadcrumb', 'fbGrid', 'fbViewer'];
+// 文件视图工具条（粘贴/队列）：独立于 _FB_FILE_ELEMENTS，需按显示态单独恢复
+var _FB_PATH_ROW = '.fb-path-row';
 
 // ── 切换到思维导图视图 ──
 async function showMindMapView() {
@@ -151,21 +154,17 @@ async function showMindMapView() {
   if (!view) return;
   view.style.display = 'flex';
 
-  // 更新顶栏标题和按钮
-  var hdr = document.getElementById('fbHeader');
-  if (hdr) {
-    var span = hdr.querySelector('span');
-    if (span) span.textContent = '思维导图';
-  }
-  _setMindMapBtn('文件管理', _MM_BTN_FB_ICON);
+  // 顶栏标题已由标签栏承担（标签标题即视图名），不再改写文字/按钮
+  _setMindMapBtn(null, null);
+
 
   // 隐藏文件管理专属按钮（粘贴、队列、修改工作区）
   var pasteBtn = document.getElementById('fbPasteBtn');
   if (pasteBtn) pasteBtn.style.display = 'none';
-  var xferBtn = document.getElementById('fbXferBtn');
-  if (xferBtn) xferBtn.style.display = 'none';
   var wsBtn = document.getElementById('fbChangeWsBtn');
   if (wsBtn) wsBtn.style.display = 'none';
+  var pathRow = document.querySelector(_FB_PATH_ROW);
+  if (pathRow) pathRow.style.display = 'none';
 
   view.innerHTML = '<div style="padding:20px;text-align:center;color:var(--tdim)">加载中…</div>';
   if (_mmGraph) { try { _mmGraph.dispose(); } catch (_) {} _mmGraph = null; }
@@ -620,20 +619,16 @@ function showFileView() {
   var upBar = document.querySelector('.fb-upload-bar');
   if (upBar) upBar.style.display = '';
 
-  // 恢复顶栏标题和按钮
-  var hdr = document.getElementById('fbHeader');
-  if (hdr) {
-    var span = hdr.querySelector('span');
-    if (span) span.textContent = '文件管理';
-  }
-  _setMindMapBtn('思维导图', _MM_BTN_MM_ICON);
+  // 恢复顶栏（标题由标签栏承担）
+  _setMindMapBtn(null, null);
+
 
   // 恢复文件管理专属按钮
-  var xferBtn = document.getElementById('fbXferBtn');
-  if (xferBtn) xferBtn.style.display = '';
   var wsBtn = document.getElementById('fbChangeWsBtn');
   if (wsBtn) wsBtn.style.display = '';
-  // pasteBtn 由 pasteFiles 逻辑控制，不强制恢复
+  // pasteBtn 由 pasteFiles 逻辑控制，不强制恢复；路径工具条随文件视图恢复
+  var pathRow = document.querySelector(_FB_PATH_ROW);
+  if (pathRow) pathRow.style.display = '';
 }
 
 // ── 切换入口 ──
@@ -2295,10 +2290,15 @@ function buildMindMapX6(container, mmdata, editable, skipFit) {
     // 面板拖拽过程中同步
     window.addEventListener('mm:panel-resize', onContainerResize);
     // ResizeObserver 兜底（覆盖非拖拽场景）
+    // 必须观察父元素：container 自身被 X6 内联定了固定 px，父级（面板/抽屉）变宽时
+    // container 的 clientWidth 不变 → 观察自己永远不触发，画布不跟随。
     var ro = null;
     if (window.ResizeObserver) {
       ro = new ResizeObserver(onContainerResize);
-      try { ro.observe(container); } catch (_) {}
+      var roTarget = (container.parentElement || container);
+      try { ro.observe(roTarget); } catch (_) {}
+      // 父元素若被 display:none 隐藏，ResizeObserver 会漏报 → 额外听 window resize
+      try { if (container.parentElement && container.parentElement !== roTarget) ro.observe(container); } catch (_) {}
     }
     graph.on('dispose', function () {
       window.removeEventListener('resize', onResize);
@@ -2421,9 +2421,9 @@ function buildMindMapX6(container, mmdata, editable, skipFit) {
         var dist = Math.sqrt(dx * dx + dy * dy) || 1;
         _mmTouch = { mode: 'pinch', lastDist: dist, lastCx: (p0.x + p1.x) / 2, lastCy: (p0.y + p1.y) / 2 };
       } else if (t.length === 1 && (!_mmTouch || _mmTouch.mode !== 'pinch')) {
-        // 边缘返回手势：左 1/5 区域 + 文件管理器已打开 → 不启动思维导图拖动，
-        // 让 fileBrowser 的关闭手势接管（右滑返回聊天页）
-        if (typeof fbOpen !== 'undefined' && fbOpen && _mmViewActive && t[0].clientX < window.innerWidth * 0.2) {
+        // 边缘返回手势：左 1/6 区域 + 文件管理器已打开 → 不启动思维导图拖动，
+        // 让 fileBrowser 的关闭手势 / 资产库入口接管（三处同一边界，不留死区）
+        if (typeof fbOpen !== 'undefined' && fbOpen && _mmViewActive && t[0].clientX < window.innerWidth / 6) {
           return;
         }
         var p = { x: t[0].clientX - rect.left, y: t[0].clientY - rect.top };

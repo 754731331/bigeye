@@ -30,6 +30,9 @@ import threading
 import time
 import uuid
 
+# Windows 下不弹黑窗（MCP server 是长驻子进程，弹一次就一直在）
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
+
 SERVER_FILE = "mcp_servers.json"
 
 # ── JSON-RPC helpers ──────────────────────────────────
@@ -80,6 +83,7 @@ class MCPServer:
                 env=merged_env,
                 text=True,
                 encoding="utf-8",
+                creationflags=_NO_WINDOW,
             )
             self._reader_thread = threading.Thread(target=self._reader, daemon=True)
             self._reader_thread.start()
