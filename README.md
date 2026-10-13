@@ -2,7 +2,8 @@
 
 这是可以让现有大语言模型拥有无限上下文的能力的系统（小眼子），主要为长航时大型任务而设计。
 现阶段已实现长上下文不降智、不遗忘、可随意跨话题继续工作，并且在无需微调大语言模型的条件下具备一定程度的学习能力和长久记忆能力。
-<img width="2543" height="1523" alt="bbe449f4f34548cccb6b8cfeb1ccfbc8" src="https://github.com/user-attachments/assets/b7766fea-a62f-4893-9da7-c081f579a5e8" />
+<img width="1920" height="1032" alt="ScreenShot_2026-10-13_145616_517" src="https://github.com/user-attachments/assets/81c288fe-7a1f-4999-a9d8-6de5190cde15" />
+
 
 有趣的是这个系统使得即使是对驾驭工具能力比较弱的deepseekV3，都能有很好的处理复杂任务能力（发现这个原因是当时调错API模型导致我几天都以为在用deepseek V4 flash开发项目🤫，并且发现deepseekV3正常智力在13k上下文以内，如果在这个项目里使用deepseekV3只要把工作记忆设定在13k就能让模型一直保持思路清晰）
 
