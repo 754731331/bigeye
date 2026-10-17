@@ -23,6 +23,8 @@ import time
 
 from .embedder import embed, cosine_sim, EMBEDDING_DIM
 from .vec_index import VecIndex
+from .write_ledger import (led_committed, led_short_circuit, led_error,
+                           get_ledger, COMMITTED, SHORT_CIRCUIT, ERROR)
 
 # ── Constants ──────────────────────────────────────
 WEIGHT_DEFAULT = 1.0
@@ -36,7 +38,18 @@ RECALL_TOP_K = 5
 RECALL_THRESHOLD = 0.5
 # relevance 硬门槛：cosine 相似度低于此值直接淘汰，不被 importance/weight 救回
 RELEVANCE_HARD_FLOOR = 0.30
-MMR_LAMBDA = 0.7
+# 2026-10-15 调参实验：0.70 → 0.90
+#   实验：同一候选池、只换 MMR λ、153 正样本 + 228 负样本，生产口径
+#   (top_k=15, th=0.35, 同topic≤2, 取前5)
+#     λ=0.70 → 注入命中 68.6%   重复对 0.7%
+#     λ=0.85 → 75.8%            0.8%
+#     λ=0.90 → 77.1% (118/153)  1.1%   ← 取这个（+8.5pt，重复仍可忽略）
+#     λ=1.00 → 77.1%            1.8%   （同分但更易推重复内容）
+#   负样本误召全程 0.00%（0/228），调高 λ 不引入误推
+#   平均注入字数 681 → 819（+20%），换来的是命中率 +8.5pt
+# MMR 的多样性惩罚从 0.30 降到 0.10：语义准度远重于门户去重，
+# 但保留 0.10 而非归零，避免 5 条名额被互近重复内容吃掉。
+MMR_LAMBDA = 0.90
 
 # v4.0 enhanced constants
 IMPORTANCE_PIN_THRESHOLD = 7.0
@@ -47,6 +60,53 @@ TOPIC_BONUS_OTHER = 0.85 # 碎片归属其他任务：降权，防跨任务碎�
 RECALL_ARCHIVE_TOP_K = 5
 RECALL_ARCHIVE_THRESHOLD = 0.4
 CAUSAL_PROPAGATION_MIN_CONFIDENCE = 0.8
+# 一跳扩散限额：注入 5 条里最多 1 条来自扩散。
+# 链长误差 0.9^n（3 跳 73%、5 跳 59%），不允许放开。
+CAUSAL_PROPAGATION_MAX = 1
+
+# ── 归档碎片召回（2026-10-14 修复，源自克隆体门卫任务）──────────
+# 被 story 吸收的 core 碎片会置 dirty=0 归档。但这类碎片是"事件之后的反思叙事"，
+# 恰恰是用户抱怨"你又忘了"时最该被推的那一类。原实现全链路硬筛 dirty=1，
+# 导致它们结构不可达（离线回放实测占失命中因的 57.5%）。
+# 改为：dirty=1，或 dirty=0 但父 story 仍活着（内容已被上层晶体吸收，非真删除）。
+INCLUDE_ARCHIVED = True
+ARCHIVED_ALIVE_PARENT_SQL = (
+    "{a}.dirty=0 AND {a}.crystal_parent_id IS NOT NULL "
+    "AND EXISTS (SELECT 1 FROM memory_fragments p "
+    "            WHERE p.id = CAST({a}.crystal_parent_id AS INTEGER) "
+    "            AND p.dirty=1)"
+)
+
+
+def _reachable_pred(alias="f"):
+    """召回域谓词：默认含"被活 story 吸收的归档碎片"。"""
+    if INCLUDE_ARCHIVED:
+        return "({a}.dirty=1 OR ({ap}))".format(
+            a=alias, ap=ARCHIVED_ALIVE_PARENT_SQL.format(a=alias))
+    return "{a}.dirty=1".format(a=alias)
+
+
+# 候选池：KNN 预筛条数 = max(top_k × MULT, MIN)。
+# 原为 top_k*4（top_k=15 → 60），实测目标碎片仅 29.6% 落在池内。
+CANDIDATE_POOL_MULT = 20
+CANDIDATE_POOL_MIN = 400
+
+# ── 打分公式（2026-10-14 修复，源自克隆体门卫任务）──────────────
+# 原为六项乘性乘积 + 绝对阈值。实测：recency 有地板 0.3、importance 默认 0.5，
+# 两者都是"恒久下跌因子"（大多数碎片就是 importance=5、就会变老），一律 <1，
+# 把乘积天然压到远低于 1 的量纲，而阈值却是绝对数 0.35。
+# 结果：152/381 条样本 relevance 中位 0.681（高度相关）却算得综合分 0.115，差 5.9 倍。
+# → "越老越忘"不是权重没调好，是数学必然。
+#
+# 改为几何平均 + relevance 主导：rel/rec/imp/wt 都是 <=1 的量，几何平均保持
+# relevance 的量纲，不会因项数多而天然变小。recency/importance 降为微调项。
+# 回退开关：SCORING_MODE = "product"。
+SCORING_MODE = "geo_rel_dominant"   # "product"(旧) | "geo_rel_dominant"(新)
+SCORE_W_RELEVANCE = 0.70
+SCORE_W_RECENCY = 0.10
+SCORE_W_IMPORTANCE = 0.10
+SCORE_W_WEIGHT = 0.10
+SCORE_RECALL_THRESHOLD = 0.50       # geo 模式下的推荐阈值（与 RECALL_THRESHOLD 同为 0.5）
 
 FRAGMENT_MIN_CHARS = 1
 
@@ -299,6 +359,9 @@ class FragmentStore:
         """
         text = text.strip()
         if len(text) < FRAGMENT_MIN_CHARS:
+            led_short_circuit(
+                "fragment_store.add", "memory_fragments:-",
+                reason="text_too_short(%d<%d)" % (len(text), FRAGMENT_MIN_CHARS))
             return None
         if ts is None:
             ts = time.strftime("%Y%m%d%H%M%S")
@@ -336,6 +399,9 @@ class FragmentStore:
                         (new_weight, new_importance, new_raw, now, exact["id"])
                     )
                     conn.commit()
+                    led_short_circuit(
+                        "fragment_store.add", "memory_fragments:%s" % exact["id"],
+                        reason="exact_dup", extra={"action": "reinforce"})
                     return exact["id"]
 
                 # Check for near-duplicates
@@ -368,6 +434,10 @@ class FragmentStore:
                             (new_weight, new_importance, new_raw, now, best_id)
                         )
                     conn.commit()
+                    led_short_circuit(
+                        "fragment_store.add", "memory_fragments:%s" % best_id,
+                        reason="near_dup(sim=%.3f)" % best_sim,
+                        extra={"action": "reinforce"})
                     return best_id
 
             # parent_id / link_type（core 层才走相似关联，knowledge/story 层直接 INSERT）
@@ -430,9 +500,37 @@ class FragmentStore:
                 try:
                     self.vec_index.insert(self._vec_table, new_id, new_emb)
                 except Exception as e:
+                    # 原实现只 print 一句 —— 索引静默失效，账本把它记成独立事件
                     print(f"[memory] vec_index sync skipped: {e}")
+                    led_error(
+                        "fragment_store.add", "idx_%s:%s" % (self._vec_table, new_id),
+                        reason="vec_index_sync_failed: %s" % e,
+                        extra={"main_write": "ok", "impact": "KNN-only"})
+
+            # ── 主写入 committed：写后读回验证，不靠"看起来成功了"──
+            verify = "unverified"
+            try:
+                chk = conn.execute(
+                    "SELECT id, length(text) AS n FROM memory_fragments WHERE id=?", (new_id,)
+                ).fetchone()
+                if chk and chk["id"] == new_id and chk["n"] and chk["n"] > 0:
+                    verify = "read_back:ok(len=%d)" % chk["n"]
+                else:
+                    verify = "read_back:MISMATCH"
+            except Exception as e:
+                verify = "read_back:err(%s)" % e
+            led_committed(
+                "fragment_store.add", "memory_fragments:%s" % new_id,
+                verify=verify, extra={"layer": layer, "source": source})
 
             return new_id
+        except Exception as _e:
+            # v2：主写入链路的任何失败都必须留痕（原来 INSERT/UPDATE 失败完全静默）
+            led_error(
+                "fragment_store.add", "memory_fragments:-",
+                reason="main_write_failed: %s: %s" % (type(_e).__name__, _e),
+                extra={"layer": layer, "source": source})
+            raise
         finally:
             conn.close()
 
@@ -484,21 +582,21 @@ class FragmentStore:
             # MMR selection
             selected = self._mmr_select(scored, top_k, conn, now)
 
-            # ── Causal propagation: for each entity in hits, follow causal edge one hop ──
-            if query_entities:
-                causal_neighbors = self._fetch_causal_neighbors(selected, query_entities, conn)
-                if causal_neighbors:
-                    for cn in causal_neighbors:
-                        cn["_causal_propagation"] = True
-                    selected.extend(causal_neighbors)
-                    # Re-dedup by id
-                    seen_ids = set()
-                    deduped = []
-                    for f in selected:
-                        if f["id"] not in seen_ids:
-                            seen_ids.add(f["id"])
-                            deduped.append(f)
-                    selected = deduped[:top_k + 2]  # causal = extra budget
+            # ── Causal propagation: one hop from selected fragments ──
+            # 2026-10-15 统一边库：不再要求 query_entities（那是入口进不来的旧锁），
+            # 锚点直接用已选碎片 id；限额 CAUSAL_PROPAGATION_MAX 条。
+            causal_neighbors = self._fetch_causal_neighbors(
+                selected, query_entities, conn, ctx_emb=ctx_emb)
+            if causal_neighbors:
+                selected.extend(causal_neighbors)
+                # Re-dedup by id
+                seen_ids = set()
+                deduped = []
+                for f in selected:
+                    if f["id"] not in seen_ids:
+                        seen_ids.add(f["id"])
+                        deduped.append(f)
+                selected = deduped[:top_k + CAUSAL_PROPAGATION_MAX]
 
             conn.commit()
             return selected
@@ -547,39 +645,49 @@ class FragmentStore:
     def _fetch_candidates(self, conn, ctx_emb, top_k, layer, topic_id):
         """用 vec_index KNN 预筛候选碎片；不可用时回退全表扫描。
 
-        KNN 拿 top_k*4 候选（多取一些留给 threshold/MMR 过滤），
+        候选池 = max(top_k × CANDIDATE_POOL_MULT, CANDIDATE_POOL_MIN)
+        （原为 top_k*4=60，实测目标碎片仅 29.6% 在池内，是失命中首要瓶颈）。
         再从 memory_fragments 拉详情。五因子打分仍用 Python 端 cosine_sim
         重算 relevance，保证评分一致性。
+
+        召回域 = dirty=1，或 dirty=0 但被活 story 吸收（INCLUDE_ARCHIVED，2026-10-14）。
 
         layer='core' 时自动包含 knowledge 层（成体系知识自然浮出，AI 无感）。
         """
         # core 层查询自动带上 knowledge + story 层（成体系知识和叙事自然浮出，AI 无感）
         layers = ("core", "knowledge", "story") if layer == "core" else (layer,)
         layer_ph = ",".join("?" for _ in layers)
+        reach = _reachable_pred("f")
+        pool = max(top_k * CANDIDATE_POOL_MULT, CANDIDATE_POOL_MIN)
 
         if self.vec_index.is_available():
-            knn = self.vec_index.query(self._vec_table, ctx_emb, top_k=max(top_k * 4, 20))
+            knn = self.vec_index.query(self._vec_table, ctx_emb, top_k=pool)
             if knn:
                 rowids = [r["rowid"] for r in knn]
-                placeholders = ",".join("?" for _ in rowids)
-                where = f"id IN ({placeholders}) AND dirty=1 AND layer IN ({layer_ph})"
-                params = rowids + list(layers)
-                if topic_id:
-                    where += " AND (topic_id=? OR topic_id IS NULL)"
-                    params.append(topic_id)
-                rows = conn.execute(
-                    f"SELECT * FROM memory_fragments WHERE {where}", params
-                ).fetchall()
-                if rows:
-                    return rows
+                # 分块查询：SQLite 变量上限 32766，池子可能上千
+                out = []
+                for i in range(0, len(rowids), 5000):
+                    chunk = rowids[i:i + 5000]
+                    placeholders = ",".join("?" for _ in chunk)
+                    where = (f"f.id IN ({placeholders}) AND {reach} "
+                             f"AND f.layer IN ({layer_ph})")
+                    params = chunk + list(layers)
+                    if topic_id:
+                        where += " AND (f.topic_id=? OR f.topic_id IS NULL)"
+                        params.append(topic_id)
+                    out.extend(conn.execute(
+                        f"SELECT * FROM memory_fragments f WHERE {where}", params
+                    ).fetchall())
+                if out:
+                    return out
         # 回退：全表扫描
         params = list(layers)
-        where_clauses = [f"dirty=1", f"layer IN ({layer_ph})"]
+        where_clauses = [reach, f"f.layer IN ({layer_ph})"]
         if topic_id:
-            where_clauses.append("(topic_id=? OR topic_id IS NULL)")
+            where_clauses.append("(f.topic_id=? OR f.topic_id IS NULL)")
             params.append(topic_id)
         return conn.execute(
-            "SELECT * FROM memory_fragments WHERE " + " AND ".join(where_clauses), params
+            "SELECT * FROM memory_fragments f WHERE " + " AND ".join(where_clauses), params
         ).fetchall()
 
     def rebuild_index(self):
@@ -588,20 +696,37 @@ class FragmentStore:
             return 0
         conn = self._conn()
         try:
+            # sqlite-vec 的 vec0 不支持 INSERT OR REPLACE（唯一约束直接报错），
+            # 也不保证无 WHERE 的 DELETE 能清空 shadow tables → 用 DROP 重建最干净。
             try:
-                conn.execute(f"DELETE FROM {self._vec_table}")
+                conn.execute(f"DROP TABLE IF EXISTS {self._vec_table}")
+                conn.commit()
             except sqlite3.OperationalError:
                 pass
-            conn.commit()
+            try:
+                conn.execute(
+                    f"""CREATE VIRTUAL TABLE IF NOT EXISTS {self._vec_table}
+                        USING vec0(embedding FLOAT[{EMBEDDING_DIM}] distance_metric=cosine)"""
+                )
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
             rows = conn.execute(
-                "SELECT id, embedding FROM memory_fragments WHERE dirty=1"
+                "SELECT f.id, f.embedding FROM memory_fragments f WHERE " + _reachable_pred("f")
             ).fetchall()
             count = 0
+            batch = []
             for r in rows:
-                emb = json.loads(r["embedding"])
-                if emb and len(emb) > 0:
-                    self.vec_index.insert(self._vec_table, r["id"], emb)
-                    count += 1
+                try:
+                    emb = json.loads(r["embedding"])
+                except Exception:
+                    continue
+                # 维度守卫：库里残留旧代模型向量（256 维），直接入索引会 Dimension mismatch
+                if emb and len(emb) == EMBEDDING_DIM:
+                    batch.append((r["id"], emb))
+            # 批量插入：单条 insert 每行新开连接，重建上万条会超时
+            if batch:
+                count = self.vec_index.insert_many(self._vec_table, batch)
             return count
         finally:
             conn.close()
@@ -643,117 +768,175 @@ class FragmentStore:
         else:
             topic_bonus = 1.0
 
+        if SCORING_MODE == "geo_rel_dominant":
+            # 几何平均 + relevance 主导：保持量纲，不让恒久下跌因子把分数压死
+            score = ((max(relevance, 1e-9) ** SCORE_W_RELEVANCE)
+                     * (max(recency, 1e-9) ** SCORE_W_RECENCY)
+                     * (max(importance, 1e-9) ** SCORE_W_IMPORTANCE)
+                     * (max(weight, 1e-9) ** SCORE_W_WEIGHT)
+                     * entity_bonus * topic_bonus)
+            return score
+
         return recency * relevance * importance * weight * entity_bonus * topic_bonus
 
     def _mmr_select(self, scored, top_k, conn=None, now=None):
         """MMR (Maximal Marginal Relevance) selection.
 
         scored: [(fragment_dict, score), ...]  fragment 内含 _relevance（真 cosine）
+
+        性能注记（2026-10-14）：原实现内层对每个候选都重新 json.loads 已选条目与
+        候选的 embedding，候选池从 60 拉到 400 后变成 O(top_k × N × 已选) 次解析
+        + 纯 Python cosine，实测单次 recall 要 6-12s（rebuild 才 0.3s）。
+        改为：预解析所有候选向量成 numpy 数组 + 矩阵运算取 max_dup。
         """
-        selected = []
+        import numpy as _np
+
+        if not scored:
+            return []
+        # 预解析：id、relevance、向量
+        ids, rels, vecs = [], [], []
+        for f, score in scored:
+            try:
+                v = json.loads(f.get("embedding") or "[]")
+            except Exception:
+                v = []
+            ids.append(f["id"])
+            rels.append(f.get("_relevance", score))
+            if v:
+                a = _np.asarray(v, dtype=_np.float32)
+                n = float(_np.linalg.norm(a))
+                vecs.append(a / n if n > 0 else a)
+            else:
+                vecs.append(None)
+        rels = _np.asarray(rels, dtype=_np.float32)
+        valid = [i for i, v in enumerate(vecs) if v is not None]
+        if valid:
+            mat = _np.vstack([vecs[i] for i in valid])   # 归一化后 cosine = 点积
+        else:
+            mat = None
+        valid_pos = {vi: k for k, vi in enumerate(valid)}
+
+        selected, sel_mask = [], []
         for _ in range(top_k):
-            best, best_mmr = None, -1.0
-            for f, score in scored:
-                if f["id"] in {s["id"] for s in selected}:
-                    continue
-                # MMR：λ × relevance - (1-λ) × max_dup
-                # 用真 relevance（cosine）而非综合分，保证 MMR 多样性基于真实相似度
-                rel = f.get("_relevance", score)
-                max_dup = max(
-                    (cosine_sim(json.loads(s.get("embedding","[]")), json.loads(f.get("embedding","[]"))) for s in selected),
-                    default=0.0
-                )
-                mmr = MMR_LAMBDA * rel - (1 - MMR_LAMBDA) * max_dup
-                if mmr > best_mmr:
-                    best_mmr = mmr
-                    best = f
-            if best is None:
+            if mat is not None and sel_mask:
+                dup = mat @ mat[sel_mask].T                    # (N, n_sel)
+                max_dup = dup.max(axis=1)
+            else:
+                max_dup = _np.zeros(len(ids), dtype=_np.float32)
+            mmr = MMR_LAMBDA * rels - (1 - MMR_LAMBDA) * max_dup
+            if selected:
+                mmr[sel_mask] = -1.0                        # 已选的不再选
+            k = int(_np.argmax(mmr))
+            if mmr[k] < -0.5:
                 break
+            f = scored[k][0]
             # 字段清晰化：
             # - relevance: 真 cosine 相似度（0~1）
             # - score: 综合分（recency × relevance × importance × weight × entity）
             # - similarity: 已废弃（曾误导下游以为是 cosine）
-            best["relevance"] = best.get("_relevance", 0.0)
-            best["score"] = best_mmr
-            best.pop("similarity", None)  # 清除旧误导字段
-            best.pop("_relevance", None)  # 清理临时字段
-            selected.append(best)
+            f["relevance"] = f.get("_relevance", 0.0)
+            f["score"] = float(mmr[k])
+            f.pop("similarity", None)  # 清除旧误导字段
+            f.pop("_relevance", None)  # 清理临时字段
+            selected.append(f)
+            rels[k] = -1e9                       # 排除已选
+            if k in valid_pos:
+                sel_mask.append(valid_pos[k])
             if conn and now is not None:
                 conn.execute(
                     "UPDATE memory_fragments SET recall_count=recall_count+1, last_recalled=? WHERE id=?",
-                    (now, best["id"])
+                    (now, f["id"])
                 )
         return selected
 
-    def _fetch_causal_neighbors(self, selected, query_entities, conn):
-        """Follow causal edges one hop from hit entities, confidence ≥ 0.8.
+    def _fetch_causal_neighbors(self, selected, query_entities, conn,
+                                limit=None, min_weight=None, ctx_emb=None):
+        """Follow causal edges one hop from already-selected fragments.
 
-        语义：召回的碎片命中了 query_entities 里的实体，
-        顺着这些实体的 causal 边找到对端实体，
-        再把对端实体相关的碎片召回（最多 3 条）。
+        ── 2026-10-15 统一边库改造 ──────────────────────────────
+        真因果边写在 memory_links（link_type IN ('cause','causal')），
+        而旧实现读 memory_relations.edge_type='causal'——那张表实测 0 条，
+        函数恒返回 []，而补 query_entities 也救不了（读的表本身就是空的）。
+
+        两处修正：
+          ① 数据源改 memory_links（真边在这：cause 228 + causal 128）
+          ② 遍历锚点改用"已选碎片的 id"，不再依赖 query_entities 是否被上游传入
+             （旧锁：server.py 不传 query_entities，入口根本进不来）
+
+        边按无向处理（写入侧 PRIMARY KEY(from_id,to_id) 只存单向）。
+        限额 limit（默认 CAUSAL_PROPAGATION_MAX=1）：链长误差 0.9^n 不允许放开。
         """
-        if not query_entities:
+        if limit is None:
+            limit = CAUSAL_PROPAGATION_MAX
+        if min_weight is None:
+            min_weight = CAUSAL_PROPAGATION_MIN_CONFIDENCE
+        if not selected or limit <= 0:
             return []
         try:
-            selected_ids = {f["id"] for f in selected}
+            selected_ids = [f["id"] for f in selected if f.get("id") is not None]
             if not selected_ids:
                 return []
-            # Check if memory_relations table exists
-            has_relations = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_relations'"
-            ).fetchone()
-            if not has_relations:
-                return []
-
-            # 1. 查 causal 边，找对端实体id（subject 或 object 任一端命中均可）
-            placeholders = ",".join("?" for _ in query_entities)
+            ph = ",".join("?" for _ in selected_ids)
             rows = conn.execute(
-                """SELECT subject_id, object_id FROM memory_relations
-                   WHERE (subject_id IN ({}) OR object_id IN ({}))
-                       AND edge_type='causal' AND confidence >= ?
-                       AND status='active'
-                   LIMIT 20""".format(placeholders, placeholders),
-                list(query_entities) + list(query_entities) + [CAUSAL_PROPAGATION_MIN_CONFIDENCE]
+                """SELECT from_id, to_id, weight FROM memory_links
+                   WHERE link_type IN ('cause','causal')
+                       AND weight >= ?
+                       AND (from_id IN ({ph}) OR to_id IN ({ph}))
+                   ORDER BY weight DESC
+                   LIMIT 40""".format(ph=ph),
+                [min_weight] + selected_ids + selected_ids
             ).fetchall()
-
-            # 收集对端实体id（排除已命中的 query_entities 自身）
-            neighbor_entity_ids = set()
-            for r in rows:
-                obj_id = r["object_id"]
-                sub_id = r["subject_id"]
-                if obj_id and obj_id not in query_entities:
-                    neighbor_entity_ids.add(obj_id)
-                if sub_id and sub_id not in query_entities:
-                    neighbor_entity_ids.add(sub_id)
-            if not neighbor_entity_ids:
+            if not rows:
                 return []
 
-            # 2. 从 memory_fragments 查对端实体关联的碎片
+            anchors = set(selected_ids)
+            best = {}
+            for r in rows:
+                a, b = r["from_id"], r["to_id"]
+                other = b if a in anchors else a
+                if other in anchors or other is None:
+                    continue
+                w = float(r["weight"] or 0.0)
+                if w > best.get(other, 0.0):
+                    best[other] = w
+            if not best:
+                return []
+
+            reach = _reachable_pred("f")
             result = []
-            for eid in neighbor_entity_ids:
-                # entity_ids 是 JSON 数组，LIKE 粗筛 + Python 精筛避免误匹配
-                frag_rows = conn.execute(
-                    """SELECT * FROM memory_fragments
-                       WHERE layer='core' AND dirty=1
-                           AND entity_ids LIKE ?
-                       LIMIT 5""",
-                    (f'%{eid}%',)
-                ).fetchall()
-                for r in frag_rows:
-                    d = dict(r)
-                    if d["id"] in selected_ids:
-                        continue
-                    frag_entities = json.loads(d.get("entity_ids") or "[]")
-                    if eid not in frag_entities:
-                        continue
-                    d["_causal_score"] = d["importance"] / 10.0
-                    result.append(d)
-                    selected_ids.add(d["id"])
-                    if len(result) >= 3:
-                        return result
+            seen = set(selected_ids)
+            for nid, w in sorted(best.items(), key=lambda kv: kv[1], reverse=True):
+                if nid in seen:
+                    continue
+                row = conn.execute(
+                    """SELECT f.* FROM memory_fragments f
+                       WHERE f.id = ?
+                           AND f.layer IN ('core','knowledge','story')
+                           AND """ + reach,
+                    (nid,)
+                ).fetchone()
+                if not row:
+                    continue
+                d = dict(row)
+                d["_causal_score"] = w
+                d["_causal_propagation"] = True
+                # 补 relevance：注入层 _score 由 rel^0.70 主导，不给的话
+                # 扩散出来的邻居会被算成 ~0 分，在最后一步被扔掉（边白修）。
+                # 用邻居自己的 embedding 跟原查询算真 cosine，不借用锚点的分数。
+                try:
+                    _nemb = json.loads(d.get("embedding") or "[]")
+                    if ctx_emb and _nemb:
+                        d["relevance"] = cosine_sim(ctx_emb, _nemb)
+                except Exception:
+                    pass
+                result.append(d)
+                seen.add(nid)
+                if len(result) >= limit:
+                    break
             return result
         except Exception:
             return []
+
 
     def recall_archive(self, context_text, top_k=RECALL_ARCHIVE_TOP_K,
                        threshold=RECALL_ARCHIVE_THRESHOLD):

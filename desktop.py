@@ -603,6 +603,56 @@ class WinApi:
         """
         return _set_dwm_frame(hexcolor)
 
+    def clipboard_read(self):
+        """读系统剪贴板文本（CF_UNICODETEXT），供前端右键菜单的"粘贴"。
+
+        为什么绕到 Python：WebView2 里 navigator.clipboard.readText 走的是
+        PermissionRequested，pywebview 没接管 ⇒ 默认被拒；而 Chromium 对普通页面的
+        document.execCommand('paste') 一律返回 false。进程内直接问系统最稳。
+        64 位下必须显式声明 restype，否则 HANDLE 会被截成 32 位指针。
+
+        ⚠️ OpenClipboard 会被别的进程（截图工具、剪贴板管理器）短时占住而返回失败，
+        这是常态不是异常 —— 必须重试几次，否则用户右键"粘贴"会莫名其妙读不到东西。
+        """
+        if os.name != "nt":
+            return ""
+        try:
+            u32 = ctypes.windll.user32
+            k32 = ctypes.windll.kernel32
+            CF_UNICODETEXT = 13
+            u32.OpenClipboard.argtypes = [wintypes.HWND]
+            u32.OpenClipboard.restype = wintypes.BOOL
+            u32.GetClipboardData.argtypes = [wintypes.UINT]
+            u32.GetClipboardData.restype = ctypes.c_void_p
+            k32.GlobalLock.argtypes = [ctypes.c_void_p]
+            k32.GlobalLock.restype = ctypes.c_void_p
+            k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+            opened = False
+            for _ in range(8):
+                if u32.OpenClipboard(None):
+                    opened = True
+                    break
+                time.sleep(0.03)
+            if not opened:
+                return ""
+            try:
+                if not u32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+                    return ""
+                h = u32.GetClipboardData(CF_UNICODETEXT)
+                if not h:
+                    return ""
+                p = k32.GlobalLock(h)
+                if not p:
+                    return ""
+                try:
+                    return ctypes.cast(p, ctypes.c_wchar_p).value or ""
+                finally:
+                    k32.GlobalUnlock(h)
+            finally:
+                u32.CloseClipboard()
+        except Exception:
+            return ""
+
     def open_external(self, url):
         """用系统默认浏览器打开链接（画中画面板"在浏览器打开"的兜底出口）。"""
         if not _is_web_url(url):

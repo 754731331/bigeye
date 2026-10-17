@@ -28,22 +28,45 @@ def _get_allow_outside():
 
 
 def _is_within_dir(full_path, dir_path):
-    """Check if full_path is inside dir_path (case-insensitive on Windows)."""
-    a = os.path.abspath(full_path)
-    b = os.path.abspath(dir_path)
-    if os.name == 'nt':
-        return os.path.normcase(a).startswith(os.path.normcase(b))
-    return a.startswith(b)
+    """Check if full_path is inside dir_path (case-insensitive on Windows).
+    用 commonpath 判定父子关系，避免裸 startswith 的前缀误判
+    （如 workspace 与 workspace-foo 互为前缀时误放行）。
+    """
+    a = os.path.normcase(os.path.abspath(full_path))
+    b = os.path.normcase(os.path.abspath(dir_path))
+    try:
+        return os.path.commonpath([a, b]) == b
+    except ValueError:
+        # 不同盘符等无法构成公共前缀 → 必然不在界内
+        return False
+
+
+# ── 工作区嵌套防护（2026-10-13）──────────────────────────
+# 背景：workspace 本身是 data/missions/<id>/workspace，AI 手拼该前缀当相对路径时
+# 会被 join 进当前 workspace，形成 workspace/data/missions/<id>/workspace/... 嵌套。
+# 对策（对标 deepseek-harness 执行端换算）：识别"missions 内部前缀"，按项目根重解析，
+# 得到的就是 AI 本意指向的真实路径。其余相对路径行为不变（'data/...' 仍指工作区内）。
+_MISSION_PREFIX_RE = re.compile(
+    r'^\.?[/\\]?[dD]ata[/\\][mM]issions[/\\][0-9a-fA-F]{6,}'
+    r'(?:[/\\][wW]orkspace(?=[/\\]|$))?[/\\]?'
+)
 
 
 def _safe_path(path):
     """Resolve path relative to workspace (if set), else project root.
-    Always normalizes via abspath to close path traversal."""
-    # Windows: 'C:'（无反斜杠）是当前目录相对路径，补成 'C:\' 才是盘符根
+    Always normalizes via abspath to close path traversal.
+
+    data/missions/<id>[/workspace] 开头的相对路径按项目根解析（真实任务路径），
+    不再叠加进当前 workspace —— 工作区嵌套 bug 的执行端防线。
+    """
+    # Windows: 'C:'（无反斜杠）是当前目录相对路径，补成 'C:\\' 才是盘符根
     if os.name == 'nt' and len(path) == 2 and path[1] == ':':
         path = path + '\\'
     if os.path.isabs(path):
         return os.path.abspath(path)
+    if _MISSION_PREFIX_RE.match(path):
+        # AI 给的是"项目根相对"语义的任务内部路径 → 直接按项目根解析
+        return os.path.abspath(os.path.join(BASE_DIR, path))
     base = getattr(_ws, 'path', None) or BASE_DIR
     return os.path.abspath(os.path.join(base, path))
 

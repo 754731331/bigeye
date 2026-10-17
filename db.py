@@ -369,6 +369,33 @@ class Database:
         rows = self._fetchall("SELECT * FROM topics ORDER BY updated_at DESC")
         return [dict(r) for r in rows]
 
+    def first_user_messages(self, tids, per_topic=5):
+        """批量取每个话题的头几条用户消息（只用于未命名任务的标题兜底显示）。
+
+        返回 {tid: [text, ...]}（按 id 升序，最多 per_topic 条）。调用方需要跳过
+        纯附件/系统提醒这类不能当标题的文本。只读、不改库 —— 标题兜底必须是
+        纯显示层行为。实测 76 个 topic 一趟 ~1ms，不会拖慢 /api/topics。
+        """
+        tids = [t for t in (tids or []) if t]
+        if not tids:
+            return {}
+        out = {}
+        n = max(1, int(per_topic or 5))
+        # SQLite 变量上限（默认 999），分批防炸
+        for i in range(0, len(tids), 400):
+            chunk = tids[i:i + 400]
+            ph = ",".join("?" * len(chunk))
+            rows = self._fetchall(
+                "SELECT topic_id, text FROM messages "
+                " WHERE topic_id IN (%s) AND role='user' "
+                " AND text IS NOT NULL AND text!='' ORDER BY id" % ph,
+                tuple(chunk),
+            )
+            for r in rows:
+                lst = out.setdefault(r["topic_id"], [])
+                if len(lst) < n:
+                    lst.append(r["text"])
+        return out
     # ── 全局搜索：任务标题/摘要 + 历史对话正文 ─────────
     @staticmethod
     def _snippet(text, q, radius=46):

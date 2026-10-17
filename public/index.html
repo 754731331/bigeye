@@ -666,6 +666,14 @@ main::-webkit-scrollbar-thumb:hover{background:var(--tdim)}
 #fbBreadcrumb .fb-crumb.active{color:var(--accent);font-weight:600}
 #fbBreadcrumb .fb-crumb-sep{opacity:.4;margin:0 2px}
 @keyframes fbSlideIn{from{transform:translateX(30px);opacity:0}to{transform:translateX(0);opacity:1}}
+/* 自动刷新：新出现的卡片淡入一次。
+   🔴 只动 opacity、绝不动 transform/尺寸 —— 位移或尺寸变化会被 grid 重新排版放大成
+   "整片卡片在跳"，那正是闪屏的观感。760ms 后 JS 会摘掉 class，不会残留。 */
+@keyframes fbArrive{from{opacity:0}to{opacity:1}}
+.fb-item.fb-arrive{animation:fbArrive .34s ease-out}
+/* 手动刷新按钮的转圈反馈：点下去要立刻有回应，否则"点了没反应"比慢更招人烦 */
+@keyframes fbSpin{to{transform:rotate(360deg)}}
+.fb-ib.fb-spin svg{animation:fbSpin .7s linear;transform-origin:50% 50%}
 @keyframes fbSlideBack{from{transform:translateX(-30px);opacity:0}to{transform:translateX(0);opacity:1}}
 .fb-grid.slide-in{animation:fbSlideIn .22s ease}
 .fb-grid.slide-back{animation:fbSlideBack .22s ease}
@@ -1207,13 +1215,19 @@ button:focus:not(:focus-visible),a:focus:not(:focus-visible),[onclick]:focus:not
    手感与数值完整复刻原 log 泡(30px↔500px,.3s cubic-bezier(.22,1,.36,1))与原 working 泡(霓虹氛围灯,展开 240px);
    正文常驻 DOM,收起同样是平滑裁切而非瞬间消失。 */
 .proc-wrap{min-width:0;max-width:100%}
-.proc-box{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:var(--radius-md);padding:6px 11px;font-size:11px;color:var(--text);opacity:.7;cursor:pointer;max-height:88px;overflow:hidden;min-width:0;max-width:100%;user-select:none;-webkit-tap-highlight-color:transparent;transition:max-height .35s cubic-bezier(.22,1,.36,1),opacity .15s,border-color .15s;display:flex;flex-direction:column}
+.proc-box{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:var(--radius-md);padding:6px 11px;font-size:11px;color:var(--text);opacity:.7;cursor:pointer;max-height:88px;overflow:hidden;min-width:0;max-width:100%;user-select:text;-webkit-user-select:text;-webkit-tap-highlight-color:transparent;transition:max-height .35s cubic-bezier(.22,1,.36,1),opacity .15s,border-color .15s;display:flex;flex-direction:column}
 .proc-box:not(.proc-live){filter:grayscale(1) brightness(.85)}
 .proc-box:hover{opacity:.85;border-color:var(--border2)}
 .proc-box.open{max-height:352px;opacity:.85}
 .proc-box::-webkit-scrollbar{width:4px}
 .proc-box::-webkit-scrollbar-track{background:transparent}
 .proc-box::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:2px}
+/* 思考框正文 / 提问卡片 = **内容区**：文字必须能拖选、能复制。
+   旧版 .proc-box 整块 user-select:none，正文一个字都选不动。
+   标题行(.proc-head-line)与按钮仍是"把手"，保持不可选，否则拖把手时会把摘要文字一起带上。 */
+.proc-body,.proc-body *,.proc-ask,.proc-ask *,.tool-group-body .tool-item,.tool-group-body .tool-item *{user-select:text;-webkit-user-select:text}
+.proc-body,.proc-ask,.tool-group-body .tool-item{cursor:text}
+.proc-head-line,.proc-caret,.proc-mode-btn,.proc-live-dot,.proc-ask .ask-label,.proc-ask .ask-btn,.proc-ask .ask-btn *,.tool-group-header,.tool-group-header *{user-select:none;-webkit-user-select:none}
 .proc-body::-webkit-scrollbar{width:4px}
 .proc-body::-webkit-scrollbar-track{background:transparent}
 .proc-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:2px}
@@ -1334,7 +1348,9 @@ html[data-theme="white"] #loadHint{box-shadow:0 5px 18px -8px rgba(0,0,0,.16)}
 #flowChartZoomViewport:not(.grabbing){cursor:grab}
 #topicTitleText{display:block;width:fit-content;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;transition:color .15s}
 #topicTitleText:hover{color:var(--accent)}
-@media(max-width:768px){ #flowChartModal .modal-box{width:100%!important;max-width:100%!important;height:100vh!important;max-height:100vh!important;border-radius:0} #flowChartBody{padding:8px!important;height:calc(100vh - 52px)!important} }
+/* 移动端专属元素：桌面上隐藏，窄屏才显示 */
+.fc-mobile-only{display:none!important}
+@media(max-width:768px){ #flowChartModal .modal-box{width:100%!important;max-width:100%!important;height:100vh!important;max-height:100vh!important;border-radius:0} #flowChartBody{padding:8px!important;height:auto!important;min-height:0!important;flex:1 1 auto!important} .fc-mobile-only{display:flex!important} }
 .send:disabled{opacity:.55;cursor:default}
 /* 停止态：发送中按钮变成停止按钮，用危险色区分 */
 .send.stopping{background:linear-gradient(135deg,#ff6a5f,var(--danger));color:#fff;box-shadow:0 3px 12px rgba(var(--danger-rgb),.32)}
@@ -1481,6 +1497,12 @@ html[data-theme="white"] #loadHint{box-shadow:0 5px 18px -8px rgba(0,0,0,.16)}
 <div id="flowChartModal" class="modal-overlay" onclick="closeFlowChart(event)" data-page-node-id="C9SKlkMEcrIBOYCgv7FCmH">
   <div class="modal-box" style="max-width:1320px;width:96vw;height:92vh;max-height:92vh;display:flex;flex-direction:column" onclick="event.stopPropagation()" data-page-node-id="qghOSQUcVYai8HAk1CZmnq">
 
+    <!-- 移动端返回条：手机上弹窗是全屏的，没有 Esc 也没法点遮罩，必须有实体返回入口 -->
+    <div id="fcMobileBar" class="fc-mobile-only" style="flex:0 0 auto;height:46px;box-sizing:border-box;padding:0 10px;border-bottom:1px solid var(--border);align-items:center;justify-content:space-between">
+      <button onclick="closeFlowChart()" style="display:inline-flex;align-items:center;gap:5px;font-size:13px;padding:6px 14px;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:6px;cursor:pointer">← 返回</button>
+      <span style="font-size:12px;color:var(--tdim)">任务流程图</span>
+    </div>
+
     <div class="modal-body" id="flowChartBody" style="flex:1 1 auto;min-height:0;overflow:hidden;padding:8px;display:flex;flex-direction:column;gap:6px" data-page-node-id="RryVkDPrDjMwLVhfWaOHPE">
       <div id="flowChartContent" style="flex:1 1 auto;min-height:0;display:flex;flex-direction:column;width:100%" data-page-node-id="Zo6QSaQmqEYLXNQiro61K7">加载中…</div>
     </div>
@@ -1584,6 +1606,7 @@ html[data-theme="white"] #loadHint{box-shadow:0 5px 18px -8px rgba(0,0,0,.16)}
       <input id="fbQInput" class="fb-q" type="text" placeholder="筛选文件名" title="按文件名筛选（空格分词，需全部命中）｜Esc 清空" oninput="fbSetQ(this.value,this)" onkeydown="if(event.key==='Escape'){this.value='';fbSetQ('',this);}" data-page-node-id="fbQInputN">
       <button id="fbPasteBtn" onclick="pasteFiles()" title="粘贴" style="display:none" data-page-node-id="aKztI3JK6nqALFuscOpgPT">粘贴</button>
       <button id="fbSortBtn" class="fb-ibtn" onclick="fbMenuOpen('sort',event)" title="排序方式"><span class="fb-ib" id="fbSortIco" data-ic=""></span></button>
+      <button id="fbRefreshBtn" class="fb-ibtn" onclick="fbArManualRefresh(this)" title="立即刷新（目录有变化时会自动跟上）"><span class="fb-ib" id="fbRefreshIco" data-ic=""></span></button>
       <button id="fbGroupBtn" class="fb-ibtn" onclick="fbMenuOpen('group',event)" title="分类依据（分组）"><span class="fb-ib" id="fbGroupIco" data-ic=""></span></button>
       <button id="fbViewBtn" class="fb-ibtn" onclick="fbMenuOpen('view',event)" title="查看（显示方式）"><span class="fb-ib" id="fbViewIco" data-ic=""></span></button>
       <button id="fbXferBtn" class="fb-ibtn" onclick="toggleXferPanel()" title="传输队列"><span class="fb-ib" id="fbXferIco" data-ic=""></span><span id="fbXferBadge" class="xq-badge" style="display:none"></span></button>
@@ -1732,6 +1755,9 @@ html[data-theme="white"] #loadHint{box-shadow:0 5px 18px -8px rgba(0,0,0,.16)}
     <div class="fv-head" data-page-node-id="kjlRlKtxPMf3pIXab4SELV">
       <span id="fvName" class="fv-name" data-page-node-id="lgJa0UHyesbGV78801gCz6"></span>
       <span class="fv-btns" data-page-node-id="J53w4b6IHhW8wDtB7T7ZNL">
+        <!-- 类型专属按钮的插槽（如 HTML 的「源码/预览」切换）：由 fvRender() 每次渲染时填充，
+             非 HTML 类型清空 —— 静态标记里不放，免得切换文件时残留上一个类型的按钮。 -->
+        <span id="fvExtraBtns"></span>
         <button id="fvPrevBtn" onclick="fvPrev()" title="上一个（←）" data-page-node-id="Dk8a43VemY5QHDomasSAxE">‹</button>
         <button id="fvNextBtn" onclick="fvNext()" title="下一个（→）" data-page-node-id="nExGlylfjMVAX8nYDMk7Es">›</button>
         <button onclick="fvDownload()" data-page-node-id="zU5q2qAGAwFG1qDgiygB4m">下载</button>
@@ -1776,6 +1802,7 @@ html[data-theme="white"] #loadHint{box-shadow:0 5px 18px -8px rgba(0,0,0,.16)}
       <input class="fb-q ab-browse-q" data-fb-el="fbQInput" type="text" placeholder="筛选文件名（空格分词）" title="按文件名筛选（空格分词，需全部命中）｜Esc 清空" oninput="fbSetQ(this.value,this)" onkeydown="if(event.key==='Escape'){this.value='';fbSetQ('',this);}">
       <span class="ab-browse-tools">
         <button data-fb-el="fbSortBtn" class="fb-ibtn" onclick="fbMenuOpen('sort',event)" title="排序方式"><span class="fb-ib" data-fb-el="fbSortIco" data-ic=""></span></button>
+        <button data-fb-el="fbRefreshBtn" class="fb-ibtn" onclick="fbArManualRefresh(this)" title="立即刷新（目录有变化时会自动跟上）"><span class="fb-ib" data-fb-el="fbRefreshIco" data-ic=""></span></button>
         <button data-fb-el="fbGroupBtn" class="fb-ibtn" onclick="fbMenuOpen('group',event)" title="分类依据（分组）"><span class="fb-ib" data-fb-el="fbGroupIco" data-ic=""></span></button>
         <button data-fb-el="fbViewBtn" class="fb-ibtn" onclick="fbMenuOpen('view',event)" title="查看（显示方式）"><span class="fb-ib" data-fb-el="fbViewIco" data-ic=""></span></button>
       </span>
@@ -1853,6 +1880,20 @@ html[data-theme="white"] #loadHint{box-shadow:0 5px 18px -8px rgba(0,0,0,.16)}
 </div>
 <script>
 
+function _isDefaultTitle(t){ var s=(t||'').toString().trim(); return s===''||s==='新任务'||s==='新话题'||s==='任务'||s==='未命名'; }
+// 未命名任务的显示名兜底：title 还是默认值且有 display_title（后端从用户第一条提问取）时用它。
+// 只影响显示，不动 title —— 规则引擎靠 title=='新任务' 提醒 AI 补任务名。
+function dispTitle(t){
+  if(!t) return '任务';
+  var ti=(t.title||'').toString().trim();
+  if(ti && !_isDefaultTitle(ti)) return t.title;   // 有正式标题 → 正式标题优先，兜底名自动失效
+  return t.display_title || t.title || '任务';
+}
+function clipTitleText(s){
+  s=(s||'').replace(/\s+/g,' ').trim();
+  if(!s) return '';
+  return s.length>24 ? s.slice(0,24)+'…' : s;
+}
 // ── AES-256-GCM Encryption wrapper (replaces fetch for API calls) ──
 (function(){
   var _encKeyB64 = '';
@@ -2076,6 +2117,112 @@ function restoreDraft(tid, doFocus){
     if(doFocus){ msgInput.focus(); msgInput.setSelectionRange(txt.length,txt.length); }
   }catch(e){}
 }
+
+// ── 未送达消息的兜底存档（2026-10-09）─────────────────────────────────
+// 为什么需要：服务端判定「重复/未受理」时**这条消息根本没入库**。
+//   ⇒ ① 结论视图每 3s 整份重取（refreshCurrentTopic）会把它连同红字和
+//        「重新发送」按钮一起冲掉；② 页面刷新后更是彻底消失。
+//   用户只知道"我发过一句话"，却再也找不回来，也判断不了自己到底发出去没有。
+// 为什么用 cmid（幂等键）而不是文本做键：文本会撞（同一句话本来就可能想再问一次）。
+//   cmid 是强证据 —— 服务端消息里出现同一个 cmid 且带服务端 id，就说明这条**确实送达了**，
+//   不用猜。与 dedupeMsgs 的去重键同源，语义天然一致。
+// 🔴 判据必须是「同 cmid **且有 id**」：本地乐观气泡没有 id，所以"当场刚标记完"不会被
+//    误判成已送达（否则存档刚写就被自己删掉，兜底等于没有）。
+var PENDING_KEY_PREFIX='omp_pending_';
+var _pendingMem=null;          // tid -> [{text,ts,cmid,reason}]（懒加载后的内存镜像）
+function _pendingAll(){
+  if(_pendingMem) return _pendingMem;
+  _pendingMem={};
+  try{
+    for(var i=0;i<localStorage.length;i++){
+      var k=localStorage.key(i);
+      if(k&&k.indexOf(PENDING_KEY_PREFIX)===0){
+        try{ _pendingMem[k.slice(PENDING_KEY_PREFIX.length)]=JSON.parse(localStorage.getItem(k))||[]; }catch(_e){}
+      }
+    }
+  }catch(e){}
+  return _pendingMem;
+}
+function pendingList(tid){
+  if(!tid) return [];
+  var v=_pendingAll()[tid];
+  return (v&&v.length)?v:[];
+}
+function _pendingFlush(tid){
+  try{
+    var all=_pendingAll(), v=all[tid];
+    if(v&&v.length) localStorage.setItem(PENDING_KEY_PREFIX+tid, JSON.stringify(v));
+    else { delete all[tid]; localStorage.removeItem(PENDING_KEY_PREFIX+tid); }
+  }catch(e){}
+}
+// 记一条"没送出去"的消息（同一 cmid 只留一份）
+function markUndelivered(tid, text, cmid, reason){
+  try{
+    if(!tid||!cmid) return;
+    // 纯附件消息没有正文：重发路径（resendMsg→doSend）本来就发不出去，
+    // 重建出来的会是个点不动的空气泡 —— 不如不记。
+    if(!String(text||'').trim()) return;
+    var all=_pendingAll();
+    var list=all[tid]||(all[tid]=[]);
+    for(var i=0;i<list.length;i++){ if(list[i].cmid===cmid){ list[i].reason=reason||list[i].reason; return; } }
+    list.push({text:String(text||'').slice(0,4000),ts:Date.now()/1000,cmid:cmid,reason:reason||''});
+    while(list.length>10) list.shift();    // 只留最近 10 条：长文本 × 无限累积会顶爆 5MB 配额
+    _pendingFlush(tid);
+  }catch(e){}
+}
+// 送出去了：按 cmid 或按文本清。
+// ⚠️ 重发会生成**新** cmid（那才是"用户真的又发了一次"），所以同文本也必须能清，
+//    否则老的未送达气泡会一直挂着、怎么发都不消失。
+function clearUndelivered(tid, cmid, text){
+  try{
+    if(!tid) return;
+    var all=_pendingAll(), list=all[tid];
+    if(!list||!list.length) return;
+    var out=[];
+    for(var i=0;i<list.length;i++){
+      var it=list[i];
+      if((cmid&&it.cmid===cmid)||(text&&it.text===text)) continue;
+      out.push(it);
+    }
+    if(out.length===list.length) return;
+    all[tid]=out;
+    _pendingFlush(tid);
+  }catch(e){}
+}
+function _pendingDrop(tid){
+  try{ var all=_pendingAll(); if(all[tid]){ delete all[tid]; _pendingFlush(tid); } }catch(e){}
+}
+// 对账：把「未送达存档」与当前消息列表对齐 —— 送达的删掉，界面上消失的重建气泡。
+// 🔴 调用时机：messages **整份来自服务端**之后（结论视图重取 / 切任务 / 全量加载）。
+//    只有那时"同 cmid 带服务端 id"才是可靠的送达证据。
+// 空转成本：没有存档时 O(1) 直接返回（这个函数会被 3s 一次的刷新反复调用）。
+function applyPending(tid){
+  try{
+    if(!tid||!currentTopic||currentTopic.id!==tid) return false;
+    var list=pendingList(tid);
+    if(!list.length) return false;
+    var keep=[], added=false;
+    for(var i=0;i<list.length;i++){
+      var it=list[i]||{};
+      var onScreen=false, delivered=false;
+      for(var j=0;j<messages.length;j++){
+        var m=messages[j];
+        if(m&&m.role==='you'&&it.cmid&&m.cmid===it.cmid){ onScreen=true; if(m.id) delivered=true; break; }
+      }
+      if(delivered) continue;                      // 服务端已有这条 → 存档作废
+      if(!onScreen){                               // 界面上被冲掉了 → 重建（红字 + 重新发送按钮）
+        messages.push({role:'you',text:it.text||'',ts:it.ts||(Date.now()/1000),
+                       error:true,error_msg:it.reason||'这条消息没有得到回复',
+                       cmid:it.cmid||'',undelivered:true,_seen:true});
+        added=true;
+      }
+      keep.push(it);                               // 还在屏幕上 / 刚重建 → 存档留着，等真正送达再删
+    }
+    if(keep.length!==list.length){ _pendingAll()[tid]=keep; _pendingFlush(tid); }
+    if(added) messages.sort(function(a,b){ return (a.ts||0)-(b.ts||0); });
+    return added;
+  }catch(e){ return false; }
+}
 // 恢复某任务的滚动位置（打开/切任务时调用）
 function restoreScroll(tid){
   try {
@@ -2092,10 +2239,10 @@ function loadCache(tid){ try { if(!tid){ var aid=localStorage.getItem(LS_KEY+'_a
 // 缓存中恢复分页游标(避免切回已加载完的话题从头分页)
 function restorePagingFromCache(tid){ var mc=loadMemCache(tid); if(mc){ msgOffset=mc.msgOffset; allLoaded=mc.allLoaded; if(mc.conclView!==undefined) _conclView=!!mc.conclView; return true; } var lc=loadCache(tid); if(lc&&lc.msgOffset!==undefined){ msgOffset=lc.msgOffset; allLoaded=lc.allLoaded; if(lc.conclView!==undefined) _conclView=!!lc.conclView; return true; } return false; }
 function cacheFresh(tid){ var d=loadCache(tid); if(!d||!d.ts) return false; return (Date.now()-d.ts)<CACHE_FRESH_MS; }
-function dropCache(){ try { var keys=[]; for(var i=0;i<localStorage.length;i++){ var k=localStorage.key(i); if(k&&k.indexOf(LS_KEY)===0) keys.push(k); } for(var j=0;j<keys.length;j++) localStorage.removeItem(keys[j]); localStorage.removeItem(LS_KEY+'_active'); } catch(e){} }
-function dropTopicCache(tid){ try{ localStorage.removeItem(LS_KEY+'_'+tid); localStorage.removeItem(DRAFT_KEY_PREFIX+tid); }catch(e){} }
+function dropCache(){ try { var keys=[]; for(var i=0;i<localStorage.length;i++){ var k=localStorage.key(i); if(k&&k.indexOf(LS_KEY)===0) keys.push(k); } for(var j=0;j<keys.length;j++) localStorage.removeItem(keys[j]); localStorage.removeItem(LS_KEY+'_active'); } catch(e){} _pendingMem=null; try{ var pk=[]; for(var q=0;q<localStorage.length;q++){ var qk=localStorage.key(q); if(qk&&qk.indexOf(PENDING_KEY_PREFIX)===0) pk.push(qk); } for(var qn=0;qn<pk.length;qn++) localStorage.removeItem(pk[qn]); }catch(e2){} }
+function dropTopicCache(tid){ try{ localStorage.removeItem(LS_KEY+'_'+tid); localStorage.removeItem(DRAFT_KEY_PREFIX+tid); }catch(e){} _pendingDrop(tid); }
 // 清理已不存在任务的缓存键(localStorage 只进不出会顶到配额,之后 saveCache 静默失败)
-function pruneCache(){ try { var alive={}; for(var i=0;i<topics.length;i++) alive[LS_KEY+'_'+topics[i].id]=1; alive[LS_KEY+'_topics']=1; alive[LS_KEY+'_active']=1; var del=[]; for(var j=0;j<localStorage.length;j++){ var k=localStorage.key(j); if(k&&k.indexOf(LS_KEY)===0&&!alive[k]) del.push(k); } for(var n=0;n<del.length;n++) localStorage.removeItem(del[n]); } catch(e){} }
+function pruneCache(){ try { var alive={}; var aliveTid={}; for(var i=0;i<topics.length;i++){ alive[LS_KEY+'_'+topics[i].id]=1; aliveTid[topics[i].id]=1; } alive[LS_KEY+'_topics']=1; alive[LS_KEY+'_active']=1; var del=[]; for(var j=0;j<localStorage.length;j++){ var k=localStorage.key(j); if(!k) continue; if(k.indexOf(PENDING_KEY_PREFIX)===0){ if(!aliveTid[k.slice(PENDING_KEY_PREFIX.length)]) del.push(k); continue; } if(k.indexOf(LS_KEY)===0&&!alive[k]) del.push(k); } for(var n=0;n<del.length;n++) localStorage.removeItem(del[n]); if(_pendingMem){ for(var pt in _pendingMem){ if(!aliveTid[pt]) delete _pendingMem[pt]; } } } catch(e){} }
 function initDom(){
   chatBox=document.getElementById('chatBox');
   msgInput=document.getElementById('msgInput');
@@ -2157,6 +2304,23 @@ function updateBalance(data){
   else balanceDisplay.style.color = 'var(--accent)';
 }
 
+/* 顶栏余额取数入口 —— 不要再直接 fetch('/api/balance')，否则会把任务级
+   余额（当前任务钉住的模型所属源）覆盖成全局源的数。
+   tidArg 可显式指定任务（切任务时用）；不传就取当前任务。
+   force=true 用于刚切完模型：跳过服务端 60s 任务级缓存，立刻要新源的数。 */
+function refreshBalance(tidArg, force){
+  var tid = tidArg || (typeof currentTopic!=='undefined' && currentTopic ? currentTopic.id : '');
+  var url = '/api/balance' + (tid ? ('?topic_id=' + encodeURIComponent(tid) + (force?'&force=1':'')) : '');
+  var reqTid = tid;
+  return fetch(url).then(function(r){ return r.json(); }).then(function(d){
+    // 切任务/切模型期间回来了旧响应：丢弃，别把别人的余额写到顶栏
+    var nowTid = (typeof currentTopic!=='undefined' && currentTopic) ? currentTopic.id : '';
+    if(reqTid && nowTid && reqTid!==nowTid) return d;
+    updateBalance(d);
+    return d;
+  }).catch(function(){});
+}
+
 function toggleBannerHidden(hidden) {
   hideBannerPref = hidden;
   fetch('/api/settings/banner', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hide_banner: hidden }) }).catch(function(){});
@@ -2176,7 +2340,7 @@ function setBalMode(m){
   fetch('/api/settings/balance_display', { method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ show_balance: balMode!=='off', mode: balMode }) }).catch(function(){});
   // 隐藏期间 updateBalance 是早退的，切回可见时补拉一次，免得显示的是旧数值
-  if(balMode!=='off') fetch('/api/balance').then(function(r){return r.json();}).then(updateBalance).catch(function(){});
+  if(balMode!=='off') refreshBalance();
 }
 function applyBalMode(){
   document.body.setAttribute('data-bal-mode', balMode);
@@ -2556,7 +2720,7 @@ function _renderSearchResults(data){
     var item=document.createElement('div');
     item.className='topic-item'+(currentTopic&&currentTopic.id===h.id?' active':'');
     var badge=h.title_match?'<span class="ss-badge">标题</span>':(h.summary_match?'<span class="ss-badge">摘要</span>':'');
-    var html='<div class="t-title">'+ssHighlight(h.title||'新任务', h.title_match?q:'')+badge+'</div>';
+    var html='<div class="t-title">'+ssHighlight(dispTitle(h), h.title_match?q:'')+badge+'</div>';
     html+='<div class="t-preview">'+ssHighlight(h.last_message||'', h.summary_match&&!h.title_match?q:'')+'</div>';
     var msgs=h.messages||[];
     for(var j=0;j<msgs.length;j++){
@@ -2645,7 +2809,7 @@ function renderTopics(){
       var runCls=t.working_status==='done'?' done':(t.working_status==='failed'?' failed':'');
       runMark=t.working_status?'<span class="run-dot'+runCls+'"></span>':'';
     }
-    item.innerHTML='<div class="t-title'+(tagTxt?' has-tag':'')+'">'+esc(t.title||'新任务')+runMark+'</div><div class="t-preview">'+esc(t.last_message||'')+'</div><div class="t-time"><span class="t-time-txt">'+tsTopic(t.updated_at||t.created_at)+'</span>'+costHtml+'</div>';
+    item.innerHTML='<div class="t-title'+(tagTxt?' has-tag':'')+'">'+esc(dispTitle(t))+runMark+'</div><div class="t-preview">'+esc(t.last_message||'')+'</div><div class="t-time"><span class="t-time-txt">'+tsTopic(t.updated_at||t.created_at)+'</span>'+costHtml+'</div>';
     content.appendChild(item);
 
     var actions=document.createElement('div');
@@ -2684,7 +2848,7 @@ async function deleteTopicItem(tid){
     if(next){
       // Immediate: update UI from local state, don't wait for server
       currentTopic=next;
-      topicTitle.textContent=next.title||'任务';
+      topicTitle.textContent=dispTitle(next);
       var cached=loadCache(next.id);
       messages=cached&&cached.messages?cached.messages:[];
       render(); renderTopics(); if(window.innerWidth<=768) closeSidebar(true);
@@ -2731,7 +2895,8 @@ async function renameTopicItem(tid, oldTitle){
   try{
     await fetch('/api/topic/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic_id:tid,title:title})});
     for(var i=0;i<topics.length;i++){ if(topics[i].id===tid){ topics[i].title=title; break; } }
-    if(currentTopic&&currentTopic.id===tid){ currentTopic.title=title; topicTitle.textContent=title; }
+    for(var _i=0;_i<topics.length;_i++){ if(topics[_i].id===tid){ delete topics[_i].display_title; } }
+    if(currentTopic&&currentTopic.id===tid){ currentTopic.title=title; delete currentTopic.display_title; topicTitle.textContent=dispTitle(currentTopic); }
     renderTopics();
     saveCache();
   }catch(e){ alert('重命名失败: '+e.message); }
@@ -3038,7 +3203,7 @@ function render(){
       if(!m._seen){ pcls+=' anim-in'; m._seen=true; }
       dp.className=pcls;
       dp.setAttribute('data-uid', mid(m));
-      dp.innerHTML='<div class="av"><img src="/icon.png" alt="AI"></div><div class="proc-wrap"><div class="proc-box'+(m.open?' open':'')+(m.live?' proc-live':'')+'" onclick="toggleProc('+mid(m)+')"><div class="proc-head-line"><span class="proc-caret">▶</span><span class="proc-sum">'+procSummary(m)+'</span>'+(m.live?'<span class="proc-live-dot"></span><span class="proc-mode-btn" title="点击切换：简约（只显示思考）/ 复杂（含工具动作与正在打的字）" onclick="event.stopPropagation();toggleProcMode()">'+procModeLabel()+'</span>':'')+'</div><div class="proc-body">'+((m.open||m.live)?procBodyHTML(m):'')+'</div></div></div>';
+      dp.innerHTML='<div class="av"><img src="/icon.png" alt="AI"></div><div class="proc-wrap"><div class="proc-box'+(m.open?' open':'')+(m.live?' proc-live':'')+'" onclick="toggleProc('+mid(m)+',event)"><div class="proc-head-line"><span class="proc-caret">▶</span><span class="proc-sum">'+procSummary(m)+'</span>'+(m.live?'<span class="proc-live-dot"></span><span class="proc-mode-btn" title="点击切换：简约（只显示思考）/ 复杂（含工具动作与正在打的字）" onclick="event.stopPropagation();toggleProcMode()">'+procModeLabel()+'</span>':'')+'</div><div class="proc-body">'+((m.open||m.live)?procBodyHTML(m):'')+'</div></div></div>';
       _frag.appendChild(dp);
       i++;
       continue;
@@ -3156,14 +3321,14 @@ async function loadTopics(){
       // _creatingTopic 期间不自动填充 currentTopic，避免与 newTopic 竞态
       if(!currentTopic && !window._creatingTopic){
         for(var i=0;i<topics.length;i++){
-          if(topics[i].id===data.active){ currentTopic=topics[i]; topicTitle.textContent=currentTopic.title||'任务'; break; }
+          if(topics[i].id===data.active){ currentTopic=topics[i]; topicTitle.textContent=dispTitle(currentTopic); break; }
         }
       } else if(currentTopic) {
         // Sync currentTopic with latest server data (e.g., name_task renamed it)
         for(var j=0;j<topics.length;j++){
           if(topics[j].id===currentTopic.id){
             currentTopic=topics[j];
-            topicTitle.textContent=currentTopic.title||'任务';
+            topicTitle.textContent=dispTitle(currentTopic);
             break;
           }
         }
@@ -3241,12 +3406,15 @@ async function switchTopic(tid){
   }
   currentTopic=localTopic||{id:tid,title:'任务'};
   restoreDraft(tid,true); // 恢复新话题草稿
-  topicTitle.textContent=currentTopic.title||'任务';
+  topicTitle.textContent=dispTitle(currentTopic);
   // Cache-first：优先内存缓存(本会话切走时刚存的)，localStorage 兜底；
   // localStorage 可能因 WebView 配额满而写入失败(静默catch)，不能只依赖它
   var cached=_memC||loadCache(tid);
   messages=cleanupLiveMsgs(groupProcess(dedupeMsgs(cached&&cached.messages?cached.messages:[])));
   for(var ci2=0;ci2<messages.length;ci2++) messages[ci2]._seen=true;
+  // 缓存里可能没有「未送达」那条（它是本地存档，未必写进缓存）→ 这里先补一次，
+  // 否则用户要等下一次服务端同步（结论视图 3s 重取）才看得见。2026-10-09
+  applyPending(tid);
   render(); chatStick=chatNearBottom(); // 缓存渲染完:用户没动=滚底,动了=保留
   // 恢复上次浏览位置（覆盖上面的滚底/保留逻辑）
   restoreScroll(tid);
@@ -3347,7 +3515,10 @@ async function switchTopic(tid){
     if(typeof wsCheckAutoOpen==='function') wsCheckAutoOpen();   // 面板关闭时切到有标签的任务：预检自动展开
   }
   try { var bc=new BroadcastChannel('dayan'); bc.postMessage({type:'msg',tid:tid}); bc.close(); } catch(e){}
-  } finally { window._switching=false; if(_seq===switchSeq) _scheduleAutoFill(); }
+  } finally { window._switching=false; if(_seq===switchSeq) _scheduleAutoFill();
+    // 切任务即换源：顶栏余额要立刻换成这个任务钉的模型的源。
+    // 用 seq 守卫：连续切多个任务时只有最后一次能写（否则慢的旧请求会把别人的数刷上去）
+    if(_seq===switchSeq) refreshBalance(tid); }
 }
 
 var msgOffset=0, msgLimit=30, allLoaded=false;
@@ -3375,7 +3546,20 @@ function dedupeMsgs(list){
     // 保持精确 ts 键，避免同名并行工具调用被误并。
     var _t=m.ts||0, _sig=String(sig).slice(0,64), key, key2;
     if(m.type==='tool'){ key=m.type+'|'+_t+'|'+_sig; key2=key; }
-    else if(m.role==='you'&&m.cmid){ key='you|cmid|'+m.cmid; key2=key; }   // 幂等键对齐：与时钟、与文本是否被服务端改写都无关
+    else if(m.role==='you'&&m.cmid){
+      key='you|cmid|'+m.cmid; key2=key;   // 幂等键对齐：与时钟、与文本是否被服务端改写都无关
+      // 同 cmid 已见过：**服务端落库行优先**（带 id）。
+      // 本地乐观气泡 / 「未送达」兜底重建的气泡都没有 id，若它们先入会把服务端行挤掉，
+      // 于是这条永远看着像"没送出去"（红字和按钮一直挂、存档也清不掉）。2026-10-09
+      if(seen[key]){
+        if(m.id){
+          for(var _ri=0;_ri<out.length;_ri++){
+            if(out[_ri]&&out[_ri].role==='you'&&out[_ri].cmid===m.cmid&&!out[_ri].id){ out[_ri]=m; break; }
+          }
+        }
+        continue;
+      }
+    }
     else{
       var _k=Math.floor(_t/2);
       key=(m.role||'')+'|'+_sig+'|k'+_k;
@@ -4170,11 +4354,26 @@ function syncLiveProcBody(body, w){
   if(procMode()==='full'){ lsig='F:'+inter.length+':'+resp.length+':'+resp.slice(-6); }
   else { lsig='S:'+((w.thinking||'')?'t':'e'); }   // 简约档：只看有没有思考，决定要不要给占位
   if(logEl._sig!==lsig){
-    logEl._sig=lsig;
-    logEl.innerHTML=(procMode()==='full')
-      ? liveLogHTML(w)
-      : ((w.thinking||'')?'':'<div class="w-live-wait">等待模型输出…</div>');
+    // 🔴 用户正在这一段里选中文字（拖选/双击选词）就先别重建：innerHTML 一刷，
+    // 选区当场消失 —— 文字能选却选不住，等于白给。不推进 _sig，
+    // 选区一结束的下一次轮询（3s）自然把新内容补上。
+    if(!_selInside(logEl)){
+      logEl._sig=lsig;
+      logEl.innerHTML=(procMode()==='full')
+        ? liveLogHTML(w)
+        : ((w.thinking||'')?'':'<div class="w-live-wait">等待模型输出…</div>');
+    }
   }
+}
+// 选区是否落在某个元素里（给"别在用户选中文字时重建 DOM"用）
+function _selInside(el){
+  try{
+    var s=window.getSelection&&window.getSelection();
+    if(!s||s.isCollapsed||!s.rangeCount) return false;
+    var n=s.getRangeAt(0).commonAncestorContainer;
+    if(n&&n.nodeType!==1) n=n.parentNode;
+    return !!(n&&el&&(el===n||el.contains(n)));
+  }catch(e){ return false; }
 }
 // ══ Follow-tail 滚动：成熟算法，用户抢控制就停，用户滚回底部就跟随 ══
 // 规则：
@@ -4304,7 +4503,16 @@ function updateProcDom(w){
   if(chatStick) chatBox.scrollTop=chatBox.scrollHeight;
 }
 // 点击展开/收起(懒构建正文,状态记在消息上,重渲后保持)
-function toggleProc(uid){
+function toggleProc(uid, ev){
+  // 正文 / 提问卡片是**内容区**：点它不折叠。
+  // 少了这道闸，用户想在思考正文里拖选一段字，一松手 click 冒泡到 .proc-box 就把整盒收起来了。
+  // 折叠把手只剩摘要行与盒子留白（正文收起时高度为 0，点不到）。
+  if(ev){
+    var _t=ev.target;
+    if(_t&&_t.closest&&(_t.closest('.proc-body')||_t.closest('.proc-ask'))) return;
+    var _s=window.getSelection&&window.getSelection();
+    if(_s&&!_s.isCollapsed&&String(_s).trim()) return;   // 拖动选择后浏览器补发的合成 click
+  }
   var m=null;
   for(var i=0;i<messages.length;i++){ if(messages[i].uid===uid){ m=messages[i]; break; } }
   var el=chatBox.querySelector('.row.proc[data-uid="'+uid+'"]');
@@ -4582,7 +4790,7 @@ function fillEmptySuggestions(){
   var html='<div class="sugs-head">继续之前的任务</div>';
   cands.forEach(function(t){
     html+='<button class="sug" onclick="switchTopic(\''+t.id+'\')">'
-      +'<span class="sug-title">'+esc(t.title||'新任务')+'</span>'
+      +'<span class="sug-title">'+esc(dispTitle(t))+'</span>'
       +'<span class="sug-last">'+esc(String(t.last_message).replace(/\s+/g,' ').slice(0,60))+'</span>'
       +'<span class="sug-time">'+tsTopic(t.updated_at||t.created_at||0)+'</span></button>';
   });
@@ -4665,7 +4873,7 @@ function recoverPendingReply(tid, wMsg){
       setSt('','就绪');
       fetch('/api/usage').then(r=>r.json()).then(d=>{updateToken(d);}).catch(()=>{});
       fetch('/api/omp_cost').then(r=>r.json()).then(d=>{updateCost(d);}).catch(()=>{});
-      fetch('/api/balance').then(r=>r.json()).then(d=>{updateBalance(d);}).catch(()=>{});
+      refreshBalance();
       loadTopics();
     }catch(e){
       // 连 /api/working 都连续失败，才认定真失联，此时才显示重发
@@ -5031,6 +5239,9 @@ async function resendMsg(text){
       messages[qi].error=false; messages[qi].error_msg=null;
     }
   }
+  // 用户已经明确"我要再发一次"：同文本的未送达存档同时作废，
+  // 否则老气泡的存档会一直重建它、怎么重发都不消失（重发带的是新 cmid）。
+  clearUndelivered(currentTopic?currentTopic.id:null, null, text);
   msgInput.value=text;
   msgInput.focus();
   doSend();
@@ -5071,7 +5282,9 @@ async function _doSendInner(){
   messages.push(wMsg);
   render();
   saveCache();
-  topicTitle.textContent=currentTopic?currentTopic.title:'任务';
+  // 未命名任务：立刻用用户这句提问当显示名，不等下一次 /api/topics 回包
+  if(currentTopic && _isDefaultTitle(currentTopic.title) && text){ currentTopic.display_title=clipTitleText(text); }
+  topicTitle.textContent=dispTitle(currentTopic);
   setSt('thinking','处理中…');
 
   if(workingPoll) clearInterval(workingPoll);
@@ -5158,15 +5371,16 @@ async function _doSendInner(){
       var _dst=await agentRunState(sendTid, 3);
       if(_dst!=='idle'){ recoverPendingReply(sendTid, wMsg); return; }
       for(var _dr2=messages.length-1;_dr2>=0;_dr2--){ if(messages[_dr2]===wMsg){ messages.splice(_dr2,1); break; } }
+      var _dErrMsg=_dHas
+        ?'这条消息被服务端当成重复提交拦下了，AI 没有收到'
+        :'这条消息没有被受理（服务端判定为重复提交）';
       for(var _de2=messages.length-1;_de2>=0;_de2--){
-        if(messages[_de2].role==='you'){
-          messages[_de2].error=true;
-          messages[_de2].error_msg=_dHas
-            ?'这条消息被服务端当成重复提交拦下了，AI 没有收到'
-            :'这条消息没有被受理（服务端判定为重复提交）';
-          break;
-        }
+        if(messages[_de2].role==='you'){ messages[_de2].error=true; messages[_de2].error_msg=_dErrMsg; break; }
       }
+      // 落一份「未送达」存档。这条消息服务端里根本没有，所以每次结论视图整份重取、
+      // 每次页面刷新，它都会连同红字和「重新发送」按钮一起消失 ——
+      // 存档让它可以被原样重建（2026-10-09）。
+      markUndelivered(sendTid, text, _cmid, _dErrMsg);
       render(); saveCache();
       setSt('error','消息未送达，可重新发送');
       return;
@@ -5191,7 +5405,9 @@ async function _doSendInner(){
         return;
       }
       for(var mi=messages.length-1;mi>=0;mi--){ if(messages[mi]===wMsg){ messages.splice(mi,1); break; } }
-      for(var ei=messages.length-1;ei>=0;ei--){ if(messages[ei].role==='you'){ messages[ei].error=true; messages[ei].error_msg=data.error||'AI 没有给出任何回复'; break; } }
+      var _eMsg=data.error||'AI 没有给出任何回复';
+      for(var ei=messages.length-1;ei>=0;ei--){ if(messages[ei].role==='you'){ messages[ei].error=true; messages[ei].error_msg=_eMsg; break; } }
+      markUndelivered(sendTid, text, _cmid, _eMsg);
       render(); saveCache();
       setSt('error','AI 无回复');
       return;
@@ -5238,12 +5454,15 @@ async function _doSendInner(){
         if(_dm.role==='ai'&&!_dm.working&&(_dm.text||'')===(aiMsg.text||'')){ _dupAi=true; break; }
       }
       if(!_dupAi) messages.push(aiMsg);
+      // 真的拿到回复了：按 cmid + 同文本撤掉「未送达」存档（同文本那半是为了
+      // 覆盖"用户不点按钮、自己重新打一遍再发"这种路径）。2026-10-09
+      clearUndelivered(sendTid, _cmid, text);
       setSt('','就绪');
       // Push notification via native bridge (Android APK)
       try { if(typeof Native!=='undefined'&&data.response) Native.notify(appName, data.response.slice(0,120)); } catch(e){}
       fetch('/api/usage').then(r=>r.json()).then(d=>{ updateToken(d); }).catch(()=>{});
       fetch('/api/omp_cost').then(r=>r.json()).then(d=>{ updateCost(d); }).catch(()=>{});
-      fetch('/api/balance').then(r=>r.json()).then(d=>{ updateBalance(d); }).catch(()=>{});
+      refreshBalance();
       if(data.topic_id){
         for(var k=0;k<topics.length;k++){
           if(topics[k].id===data.topic_id){
@@ -5264,7 +5483,7 @@ async function _doSendInner(){
           if(topics[si].id===currentTopic.id){ currentTopic=topics[si]; break; }
         }
       }
-      topicTitle.textContent=currentTopic?currentTopic.title:'任务';
+      topicTitle.textContent=dispTitle(currentTopic);
     }
   } catch(e){
     if(abortWatch){ clearInterval(abortWatch); abortWatch=null; }
@@ -5321,6 +5540,7 @@ async function _doSendInner(){
           for(var se=messages.length-1;se>=0;se--){
             if(messages[se].role==='you'){ messages[se].error=false; messages[se].error_msg=null; break; }
           }
+          clearUndelivered(sendTid, _cmid, text);
           render(); saveCache(); setSt('','');
           return;
         }
@@ -5330,6 +5550,9 @@ async function _doSendInner(){
     var errMsg='网络连接异常：'+(e.message||'请检查网络后重试');
     for(var mi=messages.length-1;mi>=0;mi--){ if(messages[mi]===wMsg){ messages.splice(mi,1); break; } }
     for(var ei=messages.length-1;ei>=0;ei--){ if(messages[ei].role==='you'){ messages[ei].error=true; messages[ei].error_msg=errMsg; break; } }
+    // 这里只敢确认"我没拿到回复"，不敢确认"服务端没收到"（请求可能已入库、只是响应丢了）。
+    // 无所谓：存档的对账判据是 cmid —— 服务端真有这条，下次同步就会把它清掉。
+    markUndelivered(sendTid, text, _cmid, errMsg);
     render(); saveCache();
     setSt('error','连接错误');
   }
@@ -5341,7 +5564,7 @@ async function _doSendInner(){
     wMsg.working=false;
     // Still sync topic title from server data if available
     if(data && data.topic_title && currentTopic) currentTopic.title = data.topic_title;
-    topicTitle.textContent = currentTopic ? currentTopic.title : '任务';
+    topicTitle.textContent = dispTitle(currentTopic);
     await loadTopics();
     return;
   }
@@ -5364,7 +5587,7 @@ async function _doSendInner(){
     for(var si=0;si<tops.length;si++){
       if(tops[si].id===sendTid){ currentTopic=tops[si]; break; }
     }
-    topicTitle.textContent=currentTopic?currentTopic.title:'任务';
+    topicTitle.textContent=dispTitle(currentTopic);
     topics=tops;
     renderTopics();
   } catch(e){}
@@ -5937,6 +6160,10 @@ function renderFileBrowser(data, mode){
   else fbCurrentPath=subdir;
   fbLastListDir=subdir||'';
   fbLastListMode=mode;
+  // 登记本次的目录指纹（§20 自动刷新）：手动加载后立刻对齐，省掉紧接着那次
+  // "明知没变还要再算一遍签名"的往返。必须在 fbLastListMode 之后、且此刻作用域
+  // 已由 loadWorkspaceFiles 的 fbScopeRun 钉好，否则会记到另一栏头上。
+  if(typeof fbArNoteSig==='function') fbArNoteSig(files);
   fbWorkspaceAbs=(data&&(data.workspace||data.mission_dir))||'';
   fbAllowOutside=(data&&data.allow_outside===true);
   if(ws){
@@ -6050,7 +6277,9 @@ var FB_ICONS={
   detail:'<path d="M4 6.5h16M4 12h16M4 18h10"/>',
   // 传输队列：上下双向箭头。⚠️ 不能画"向下箭头落进托盘"——那个形状只表达"下载"，
   // 而队列里上传（粘贴到目录）/下载（另存）都有，用户 2026-09-28 直接指出会误导。
-  xfer:'<path d="M8.5 4.5V15.9"/><path d="M5.5 12.9 8.5 15.9l3-3"/><path d="M15.5 19.5V8.1"/><path d="M12.5 11.1 15.5 8.1l3 3"/>'
+  xfer:'<path d="M8.5 4.5V15.9"/><path d="M5.5 12.9 8.5 15.9l3-3"/><path d="M15.5 19.5V8.1"/><path d="M12.5 11.1 15.5 8.1l3 3"/>',
+  // 刷新：两段圆弧 + 两个箭头（经典"循环"符号，比"单个回转箭头"更明确是"重新来一遍"）
+  refresh:'<path d="M20 11.5a8 8 0 1 1-2.6-5.9"/><path d="M20 4v4.2h-4.2"/><path d="M4 12.5a8 8 0 0 0 2.6 5.9"/><path d="M4 20v-4.2h4.2"/>'
 };
 function fbIconHtml(n){
   var inner=FB_ICONS[n];
@@ -6325,6 +6554,8 @@ function fbSortSyncUI(){
   fbIcon(fbEl('fbSortIco'),'sort');
   fbIcon(fbEl('fbGroupIco'),'group');
   fbIcon(fbEl('fbViewIco'), fbSort.view==='detail'?'detail':'grid');
+  // 刷新按钮（§20 自动刷新）：图标恒定，没有"当前值"概念，同样每轮幂等刷新
+  fbIcon(fbEl('fbRefreshIco'),'refresh');
   var b1=fbEl('fbSortBtn'), b2=fbEl('fbGroupBtn'), b3=fbEl('fbViewBtn');
   if(b1){ b1.title='排序方式：'+sortTxt; b1.setAttribute('data-val',sortTxt); }
   if(b2){ b2.title='分类依据：'+groupTxt; b2.setAttribute('data-val',groupTxt); }
@@ -6336,6 +6567,8 @@ function fbSortSyncUI(){
   if(b1) b1.classList.toggle('disabled',dis);
   if(b2) b2.classList.toggle('disabled',dis);
   if(b3) b3.classList.toggle('disabled',dis);
+  var b4=fbEl('fbRefreshBtn');
+  if(b4) b4.classList.toggle('disabled',dis);
 }
 function fbSortKey(){ return fbScope==='ab' ? 'fbSortState_ab' : 'fbSortState'; }
 function fbSortLoad(){
@@ -6455,6 +6688,393 @@ fbSortLoad();                                          // 主网格（左栏）
 fbScopeUse('ab'); fbSortLoad(); fbScopeUse('main');    // 资产库浏览（右栏）各自一份偏好
 // 队列按钮的"当前值"概念不存在（图标恒定，只有开/关状态），不在 fbSort 的同步链里 → 单独初始化一次
 (function(){ fbIcon(document.getElementById('fbXferIco'),'xfer'); })();
+
+
+// ═══ ⑳ 文件浏览器自动刷新（2026-10-16）══════════════════════════════════════
+// 目标：目录内容一变，网格自己跟上；不必等用户切标签/切面板才看到。
+//
+// ── 为什么不能直接轮询 loadWorkspaceFiles（那是最容易写、也最容易出错的版本）──
+//   renderFileBrowser 结尾是 `grid.innerHTML=html` **整块重建**：
+//     · 已解码的缩略图 <img> 全部销毁重来 ⇒ 每张图闪一次白底
+//     · .slide-in 动画重来                    ⇒ 整块位移一下
+//     · 用户正要点的那张卡被换掉                ⇒ 误触（点文件夹结果点没了）
+//     · fbQ 被重置                            ⇒ 后台刷新不该动用户当前的筛选词
+//   这就是"闪屏"。所以本模块走**增量对账**：指纹比对 → 只在真变了时取全量 →
+//   按 data-fbname 逐卡复用 DOM 节点（图片不重新解码 ⇒ 零闪烁），只插新的、删旧的。
+//
+// ── 四条不能省的判据 ───────────────────────────────────────────────────────
+//   ① 网络失败 ≠ "目录没变"。失败时**不动 DOM、也不更新签名**，下一轮照常重比。
+//      否则网络一断用户会以为文件没生成（§32/§18 同族：静默早退最伤人）。
+//   ② 指纹没变 ⇒ 一个字节都不动 DOM。只在真变了时重排，这是"不闪"的第一前提。
+//   ③ 没画成就不许记签名。fbArApply 返回 false（手势避让 / 目录被换掉）时若照样
+//      更新签名，这次变更就永久丢了 —— 用户再也看不到，且没有任何提示。
+//   ④ 作用域必须钉死。两栏共用一套全局态，回调里不钉住会把 A 栏画进 B 栏（fbScopeRun）。
+var FB_AR={
+  on:true,
+  iv:2500,     // 轮询间隔。文件变更是秒级事件，2.5s 足够且不吵
+  timer:0,
+  busy:false,  // 同一时刻只允许一个探测在飞
+  sig:{},      // 作用域 → 上次确认过的目录指纹
+  fail:{},     // 作用域 → 连续失败次数
+  gen:0        // 代号：请求在飞时用户切了栏/目录，回来发现代号变了就丢弃
+};
+
+// 本地目录指纹（32 位 FNV-1a 变体，h 跨条目累积）。
+// 🔴 必须与服务端 /api/mission-files?sig=1 里的那段**逐字节一致**，三处口径都要对齐：
+//    ① 累积方式：h 逐字符累进且**跨条目不重置**。若每项都从初值重算再覆盖，
+//       就等于"只看最后一个条目"——目录里放 a.txt+b.txt 与只放 b.txt 会撞出同一个值。
+//    ② 数值截断：Python int(x) 向零截断，JS 用 Math.floor，不能用 Math.round
+//       （1.4 两者相同，但 1.6 会分别是 1 和 2，值就错开了）。
+//    ③ 排序：按 name 升序，两端都必须先排序再算。
+//    改这里必须同步改 server.py 里那段（实测口径不一致时，自动刷新会退化成
+//    "每 2.5s 全量拉取 + 全量重排"，比不做还糟）。
+// 用途：服务端没重启（老 9890 无 sig=1）时靠它判变；拿到全量后二次校验，
+//       避免"指纹查询与列表查询之间又发生一次写入"导致画面与真实不符。
+function fbArSigLocal(files){
+  var a=(files||[]).slice().sort(function(x,y){ return x.name<y.name?-1:(x.name>y.name?1:0); });
+  var h=2166136261;
+  for(var i=0;i<a.length;i++){
+    var f=a[i];
+    var s=f.name+'|'+(f.is_dir?1:0)+'|'+Math.floor(f.size||0)+'|'+Math.floor(f.mtime||0);
+    for(var j=0;j<s.length;j++){ h=Math.imul(h^s.charCodeAt(j),16777619)>>>0; }
+    h=Math.imul(h^s.length,16777619)>>>0;
+  }
+  return a.length+'-'+('00000000'+h.toString(16)).slice(-8);
+}
+
+// 当前作用域正在显示的目录。必须与 loadWorkspaceFiles 实际请求的基准一致，
+// 否则会把 A 目录的列表画到 B 目录的网格里。
+// 🔴 这里**不能读 FB_SCOPES[sc] 的快照**，必须用 fbScopeRun 切过去读实时全局态：
+//    快照只在 fbScopeSave()（切作用域那一刻）才同步，而右栏 abBrowseOpen() 是在
+//    fbScopeUse('ab') 之后设 fbExplorerPath 的 —— 中途任何一次切回 main 都会把
+//    快照留成旧值。实测症状：右栏自动刷新一直查 subdir=''（工作区根）而不是资产目录，
+//    于是"右栏新增文件不出现"，且指纹也记在错的目录上。
+//   workspace 模式 → fbCurrentPath；explorer 模式 → fbExplorerPath
+//   资产库虚拟根（__ASSETS__）不是真实目录 ⇒ 返回 null，不参与
+function fbArCurDir(sc){
+  var d=null;
+  fbScopeRun(sc, function(){
+    if(fbExplorerPath==='__ASSETS__') return;
+    d=(fbLastListMode==='explorer')?(fbExplorerPath||''):(fbCurrentPath||'');
+  });
+  return d;
+}
+function fbArCurMode(sc){
+  var m='workspace';
+  fbScopeRun(sc, function(){ m=fbLastListMode||'workspace'; });
+  return m;
+}
+
+// 用户此刻的手势：拖文件 / 长按菜单 / 框选中 / 排序菜单开着 / 有模态框。
+// 这些状态下重排网格会把用户正按着的东西换掉 ⇒ 一律跳过，等下一轮。
+function fbArUserBusy(){
+  if(window.__fbDragItem) return true;
+  if(document.getElementById('fbCtxMenu')) return true;
+  if(document.body.classList.contains('fb-lassoing')) return true;
+  if(typeof _fbMenuEl!=='undefined'&&_fbMenuEl) return true;
+  if(document.querySelector('.modal-overlay.show')) return true;
+  return false;
+}
+
+// 某一栏此刻是否"值得查"：面板真的开着 + 这一栏真的在显示 + 不在用户手势中
+function fbArScopeLive(sc){
+  try{
+    if(!currentTopic) return false;
+    if(fbArUserBusy()) return false;
+    if(sc==='ab'){
+      if(typeof AB_BROWSE_READY==='undefined'||!AB_BROWSE_READY) return false;
+      if(typeof assetOpen==='undefined'||!assetOpen) return false;
+      var root=document.getElementById('abBrowse');
+      return !!(root&&root.style.display!=='none');
+    }
+    if(!fbOpen) return false;
+    var fb=document.getElementById('fileBrowser');
+    if(!fb||fb.style.display==='none') return false;
+    // 主栏可能停在别的标签（看文件预览 / 思维导图），此时 #fbGrid 是隐藏的 ⇒ 查了也白查
+    var g=document.getElementById('fbGrid');
+    return !!(g&&g.style.display!=='none');
+  }catch(e){ return false; }
+}
+
+function fbArStart(){ if(!FB_AR.timer) FB_AR.timer=setInterval(function(){ fbArTick(false); }, FB_AR.iv); }
+function fbArStop(){ if(FB_AR.timer){ clearInterval(FB_AR.timer); FB_AR.timer=0; } }
+// 手动刷新 / 切回前台：force=true 时即便指纹没变也重查（覆盖"同指纹但 DOM 被人动过"）
+function fbArKick(force){ fbArTick(!!force); }
+
+// 工具栏那颗刷新按钮。走内联 onclick ⇒ 不经过网格的委托，作用域可能停在上一次点过的
+// 另一栏上 —— 必须先按按钮自身反查所属栏，否则会刷错那一栏（§25 的老坑）。
+function fbArManualRefresh(el){
+  var sc=el?fbScopeOfEl(el):null;
+  if(sc) fbScopeUse(sc);
+  var spin=el?el.querySelector('.fb-ib'):null;
+  if(spin) spin.classList.add('fb-spin');
+  // 面板/浏览层没开时 fbArScopeLive 会直接跳过 → 这里显式走一次全量加载，
+  // 否则用户点了按钮却什么都没发生（"按钮存在就必须有响应"）。
+  var grid=fbEl('fbGrid');
+  if(fbArScopeLive(fbScope)&&grid){
+    fbArKick(true);
+  }else{
+    loadWorkspaceFiles(fbCurDir(), fbScope==='ab'?'explorer':_fbMode());
+  }
+  setTimeout(function(){ if(spin) spin.classList.remove('fb-spin'); }, 700);
+}
+
+function fbArTick(force){
+  if(!FB_AR.on) return;
+  if(!force&&document.hidden) return;   // 后台不刷：没人看得见，还白烧 CPU
+  if(FB_AR.busy) return;
+  var list=[];
+  if(fbArScopeLive('main')) list.push('main');
+  if(fbArScopeLive('ab'))   list.push('ab');
+  if(!list.length) return;
+  FB_AR.busy=true;
+  var gen=++FB_AR.gen;
+  var finished=false;
+  function finish(){ if(finished) return; finished=true; FB_AR.busy=false; }
+  // 兜底：若 fetch 既不 resolve 也不 reject（罕见但见过），8s 后释放 busy。
+  // 不加这条，一次卡死就让自动刷新永久停摆 —— 比"多刷一次"严重得多。
+  setTimeout(finish, 8000);
+  var i=0;
+  (function step(){
+    if(i>=list.length){ finish(); return; }
+    var sc=list[i++];
+    var advanced=false;
+    // 🔴 next() 只许触发一次，且 fbArProbe 内部即使同步抛异常也必须续跑：
+    //    否则一栏出错会连带另一栏永远探不到，busy 也只能等 8s 兜底才释放
+    //    （用户观感＝"自动刷新卡死了"）。toast 未定义那类问题就是这么放大成停摆的。
+    function next(){
+      if(advanced||finished) return;
+      advanced=true;
+      setTimeout(step, 0);
+    }
+    try{ fbArProbe(sc, gen, next); }
+    catch(e){ fbArFail(sc); next(); }
+  })();
+}
+
+function fbArProbe(sc, gen, next){
+  next=next||function(){};
+  var dir=fbArCurDir(sc), mode=fbArCurMode(sc);
+  var tid=currentTopic?currentTopic.id:'';
+  if(dir===null||!tid){ next(); return; }
+  var qs='topic_id='+encodeURIComponent(tid)+'&subdir='+encodeURIComponent(dir);
+  fetch('/api/mission-files?'+qs+'&sig=1')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if(gen!==FB_AR.gen){ next(); return; }               // 期间切了栏/目录 ⇒ 丢弃
+      // 老服务端没上 sig=1：响应会直接带 files，靠本地指纹判变
+      var sig=(d&&typeof d.sig==='string'&&d.sig)?d.sig:((d&&d.files)?fbArSigLocal(d.files):null);
+      if(sig===null){ fbArFail(sc); next(); return; }
+      if(sig===FB_AR.sig[sc]){ next(); return; }            // ② 没变 ⇒ 一个字节都不动
+      if(fbArCurDir(sc)!==dir||fbArCurMode(sc)!==mode){ next(); return; }
+      if(d&&d.files){ fbArCommit(sc,d.files,dir,mode,gen); next(); return; }
+      // 指纹变了但没给全量 → 再取一次列表（本模块唯一"多一次往返"的情况）
+      fetch('/api/mission-files?'+qs)
+        .then(function(r){ return r.json(); })
+        .then(function(dd){
+          if(gen!==FB_AR.gen){ next(); return; }
+          if(!dd||!dd.files){ fbArFail(sc); next(); return; }
+          fbArCommit(sc, dd.files, dir, mode, gen);
+          next();
+        })
+        .catch(function(){ if(gen===FB_AR.gen) fbArFail(sc); next(); });
+    })
+    .catch(function(){ if(gen===FB_AR.gen) fbArFail(sc); next(); });
+}
+
+// 🔴 ③ 只有真画成了才记签名。fbArApply 返回 false 表示这次没落成
+//    （手势避让 / 目录被换掉），此时若照样更新指纹，这次变更就永久丢失且无任何提示。
+function fbArCommit(sc, files, dir, mode, gen){
+  if(gen!==FB_AR.gen) return;
+  if(fbArCurDir(sc)!==dir||fbArCurMode(sc)!==mode) return;
+  var ok=false;
+  fbScopeRun(sc, function(){ ok=fbArApply(files, dir, mode); });
+  if(!ok) return;
+  FB_AR.sig[sc]=fbArSigLocal(files);
+  FB_AR.fail[sc]=0;
+  fbArSyncTabHint(sc);
+}
+
+// 失败计数：连续 5 次才提示一次（抖一下就弹窗＝骚扰），成功一次即清零
+function fbArFail(sc){
+  FB_AR.fail[sc]=(FB_AR.fail[sc]||0)+1;
+  if(FB_AR.fail[sc]>=5){
+    FB_AR.fail[sc]=0;
+    // 🔴 提示必须包 try/catch：本页没有任何地方定义 toast()（既有的 6 处调用其实都是死引用，
+    //    只是从没走到失败分支）。若提示自己抛错，会把探测链的 next() 一起打断 ⇒
+    //    busy 只能等 8s 兜底才释放，用户观感就是"自动刷新卡死了"。
+    //    与 index.html:15332 既有的 `typeof toast==='function'` 防御口径保持一致。
+    try{ if(typeof toast==='function') toast('文件列表自动刷新暂时中断，正在重试…', 2500); }catch(e){}
+  }
+  // 🔴 失败时**绝不更新签名**：我们并不知道目录此刻是什么状态，
+  // 写成"当前值"等于伪造一份没验证过的真相，下一轮就会安静地跳过（§18 静默早退的教训）。
+}
+
+// 工作区根目录文件数变了 ⇒「文件」标签显隐跟着变（与 renderFileBrowser 同一口径）
+function fbArSyncTabHint(sc){
+  if(sc!=='main'||!currentTopic) return;
+  try{
+    var at=wsPaneActive(0);
+    if(!at||(at.type!=='files'&&at.type!=='explorer')) return;
+    var has=!!(fbFilesRaw&&fbFilesRaw.length);
+    if(wsFilesSeen[currentTopic.id]!==has){ wsFilesSeen[currentTopic.id]=has; wsTabsRender(); }
+  }catch(e){}
+}
+
+// ── 增量落 DOM（不闪的核心）────────────────────────────────────────────────
+function fbArApply(newFiles, subdir, mode){
+  var grid=fbEl('fbGrid');
+  if(!grid) return false;
+  if(fbExplorerPath==='__ASSETS__') return false;
+  if(fbArUserBusy()) return false;      // 宁可晚 2.5s，也不换掉用户正按着的卡
+  if(fbLastListDir!==subdir) return false;   // 请求在飞时用户翻页了
+
+  // 旧列表按名字索引：既用来复用节点，也用来把选择态迁到新索引上
+  var prevByName={}, prevByIdx=[];
+  for(var i=0;i<fbFilesData.length;i++){ prevByName[fbFilesData[i].name]=fbFilesData[i]; prevByIdx[i]=fbFilesData[i]; }
+
+  // 排序/分组/筛选走唯一出口 fbApplyView ⇒ 与改排序、切目录口径完全一致
+  var files=fbApplyView(newFiles, subdir).files;
+
+  // 期望序列（渲染顺序）：分组标题行与卡片交错。
+  // ⚠️ fIdx 是"文件在 files 里的真实下标"，data-idx 必须用它 —— 不能用 seq 位置，
+  //    否则分组开着时每张卡的 data-idx 都会偏（data-idx 是全站索引 fbFilesData 的唯一依据）。
+  var seq=[], fIdx=0;
+  if(fbSort.group&&fbSort.group!=='none'){
+    var lastG=null, gc=0, buf=[];
+    for(var a=0;a<files.length;a++){
+      var g=fbGroupInfo(files[a], fbSort.group);
+      if(g.n!==lastG){
+        if(lastG!==null){ seq.push({gh:lastG, n:gc}); for(var b=0;b<buf.length;b++) seq.push(buf[b]); }
+        lastG=g.n; gc=0; buf=[];
+      }
+      gc++; buf.push({f:files[a], i:fIdx++});
+    }
+    if(lastG!==null){ seq.push({gh:lastG, n:gc}); for(b=0;b<buf.length;b++) seq.push(buf[b]); }
+  }else{
+    for(a=0;a<files.length;a++) seq.push({f:files[a], i:fIdx++});
+  }
+
+  // 前缀节点（列头 / 上级 / 资产库卡片）：不是文件卡片，原地保留同一个对象
+  var keepCols=grid.querySelector(':scope > .fb-cols');
+  var keepBack=grid.querySelector(':scope > .fb-item[data-back]');
+  var keepAssets=grid.querySelector(':scope > .fb-item[data-dir="ASSETS_VROOT"]');
+
+  // 组装期望节点序列（复用优先）
+  var want=[], arrived=[], used={};
+  if(keepCols)   want.push(keepCols);
+  if(keepBack)   want.push(keepBack);
+  if(keepAssets) want.push(keepAssets);
+  for(i=0;i<seq.length;i++){
+    var it=seq[i];
+    if(it.gh){
+      var ghEl=document.createElement('div');
+      ghEl.className='fb-group-head';
+      ghEl.innerHTML=esc(it.gh)+'<span class="n">'+it.n+' 项</span>';
+      want.push(ghEl);
+      continue;
+    }
+    var f=it.f, node=fbArFindCard(grid, f.name);
+    var p=prevByName[f.name];
+    // 文件被改写过（大小/时间变了）⇒ 显示内容可能变了。
+    // 详细视图只改三格文字；网格视图要换节点让缩略图重取。
+    if(node&&p&&((p.size||0)!==(f.size||0)||Math.round(p.mtime||0)!==Math.round(f.mtime||0))){
+      if(fbSort.view==='detail'){ fbArSyncRowMeta(node,f); }
+      else { node.parentNode&&node.parentNode.removeChild(node); node=null; }
+    }
+    if(node){
+      // 复用：只改会变的属性，其余一概不碰 ⇒ <img> 不重新解码，零闪烁
+      node.setAttribute('data-idx', String(it.i));
+      node.setAttribute('data-dir', subdir?subdir+'/'+f.name:f.name);
+      node.setAttribute('data-isdir', f.is_dir?'1':'0');
+    }else{
+      node=fbArNode(fbItemHtml(f, it.i, subdir));
+      if(node) arrived.push(node);
+    }
+    if(node){ want.push(node); used[f.name]=1; }
+  }
+  // 空态提示（筛选无结果时才有）
+  var hint=fbEmptyHint();
+  if(hint){
+    var eh=document.createElement('div');
+    eh.innerHTML=hint;
+    if(eh.firstElementChild) want.push(eh.firstElementChild);
+  }
+
+  fbFilesData=files;
+
+  // 选择态按**文件名**迁移：索引会因增删整体位移，跟着旧索引走必然选错文件
+  var selNames={};
+  for(i=0;i<fbSelected.length;i++){ var pf=prevByIdx[fbSelected[i]]; if(pf) selNames[pf.name]=1; }
+  fbSelected=[];
+  for(i=0;i<files.length;i++){ if(selNames[files[i].name]) fbSelected.push(i); }
+
+  // 对账落 DOM：先把不在期望序列里的旧节点摘掉（文件被删/改名），
+  // 再按期望顺序 insertBefore —— 已经在正确相对位置的节点不会被移动，Chrome 也就不会
+  // 重新解码它们的 <img>。这比 grid.innerHTML=整块重建少一次全量解码。
+  var live=grid.querySelectorAll('.fb-item,.fb-group-head,.fb-empty');
+  for(i=0;i<live.length;i++){
+    if(want.indexOf(live[i])<0 && live[i].parentNode===grid) grid.removeChild(live[i]);
+  }
+  var cursor=grid.firstChild;
+  for(i=0;i<want.length;i++){
+    var el=want[i];
+    if(el===cursor){ cursor=cursor.nextSibling; continue; }
+    grid.insertBefore(el, cursor);
+  }
+
+  // 新出现的卡片给一次极短的淡入（≤720ms，纯 opacity，不参与任何 transition ⇒ 不是闪屏）
+  for(i=0;i<arrived.length;i++){
+    (function(node){
+      node.classList.add('fb-arrive');
+      setTimeout(function(){ node.classList.remove('fb-arrive'); }, 760);
+    })(arrived[i]);
+  }
+
+  updateFileSelectionUI();
+  fbQSyncUI();
+  fbSortSyncUI();
+  return true;
+}
+// 按 data-fbname 找可复用的卡片节点。刻意逐次 query 而不是一次性建表：
+// 目录通常几十项，这样既省代码也避免"建表时 DOM 已被上一轮改过"的时序坑。
+function fbArFindCard(grid, name){
+  var nodes=grid.querySelectorAll('.fb-item[data-fbname]');
+  for(var i=0;i<nodes.length;i++){
+    if(nodes[i].getAttribute('data-fbname')===name) return nodes[i];
+  }
+  return null;
+}
+function fbArNode(html){
+  var box=document.createElement('div');
+  box.innerHTML=html;
+  return box.firstElementChild;
+}
+// 详细视图：只改日期/类型/大小三格。不能整块换节点 —— 那会连带干掉 .fb-sel 与选中态
+function fbArSyncRowMeta(node, f){
+  var cols=node.querySelectorAll('.fb-col');
+  if(!cols||cols.length<3) return;
+  var d=fbFmtDate(f.mtime);
+  if(cols[0].textContent!==d) cols[0].textContent=d;
+  var kind=f.is_dir?'文件夹':fbKindLabel(f.name);
+  if(cols[1].textContent!==kind) cols[1].textContent=kind;
+  var sz=f.is_dir?'':fbFmtSize(f.size);
+  if(cols[2].textContent!==sz) cols[2].textContent=sz;
+}
+
+// 手动加载后登记指纹，省掉紧接着那一次"明知没变还要重算"的往返。
+// ⚠️ 必须在 renderFileBrowser 内部（作用域已由 fbScopeRun 钉好）登记，否则会记到错的那一栏。
+function fbArNoteSig(files){
+  try{ FB_AR.sig[fbScope]=fbArSigLocal(files||[]); }catch(e){}
+}
+
+// 页面切回前台：立刻补一次 —— 后台期间攒下的变化，用户期望一回来就看到。
+// hidden 时作废在飞的请求（它回来时 DOM 可能已不是同一语境了）。
+document.addEventListener('visibilitychange', function(){
+  if(document.hidden){ FB_AR.busy=false; FB_AR.gen++; }
+  else setTimeout(function(){ fbArKick(true); }, 150);
+});
+fbArStart();
 
 
 // ── FileGrid 可复用组件（节点③ 抽离：画布文件窗口/资产详情共用）────
@@ -6843,7 +7463,7 @@ function wsTabBody() {
     if (wsEl) wsEl.style.display = 'none';
     if (bar) bar.style.display = 'none';
     if (bc) bc.classList.remove('show');
-    if (body) { body.style.display = 'flex'; body.className = 'ws-file-view'; wsTabFileRender(tab, body); }
+    if (body) { body.style.display = 'flex'; body.className = 'ws-file-view'; wsTabFileRender(tab, body, 'wsTabFileBody'); }
   } else if (tab.type === 'draft' || tab.type === 'temp') {
     if (mm) mm.style.display = 'none';
     if (row) row.style.display = 'none';
@@ -6972,9 +7592,16 @@ function wsTabFileRender(tab, body, ctx) {
   var u = wsFileUrl(path), uq = u.replace(/"/g, '&quot;');
   var k = fvKind(name);
   var html = '<div class="fv-head"><span class="fv-name">' + esc(name) + sizeTxt + '</span>'
-    + '<span class="fv-btns"><button onclick="wsTabFileDownload()" title="加入下载队列">下载</button></span></div>'
+    + '<span class="fv-btns"><span id="wsFileX_' + esc(ctx) + '"></span>'
+    + '<button onclick="wsTabFileDownload()" title="加入下载队列">下载</button></span></div>'
     + '<div class="fv-body" id="' + esc(ctx) + '">';
   if (k === 'img') html += '<img class="fv-img" src="' + uq + '" alt="">';
+  else if (k === 'html') {
+    // HTML：默认渲染成网页（iframe 走 /api/fs-raw/，同目录 css/js/图都能加载）；
+    // 头栏按钮切回源码。壳先铺上，内容在 body.innerHTML 之后异步填（与 PDF/txt 一致），
+    // 否则此刻 DOM 里还没这个槽位。
+    html += fvHtmlModeGet() === 'source' ? '<div class="fv-info">加载中…</div>' : '<div class="fv-info">页面加载中…</div>';
+  }
   else if (k === 'pdf') html += fvNativePdfOk()
     ? '<iframe class="fv-frame" src="' + uq + '"></iframe>'
     : '<div class="fv-info">本机浏览器没有内置 PDF 阅读器<br><span style="font-size:11px;color:var(--tdim)">请在「文件浏览器」里双击该文件，用大眼阅读器预览（连续滚动 / 双指缩放）</span></div>';
@@ -7008,6 +7635,14 @@ function wsTabFileRender(tab, body, ctx) {
   }
   html += '</div>';
   body.innerHTML = html;
+  if (k === 'html') {
+    // 必须是 body.innerHTML 之后：头部按钮槽位此刻才存在。
+    var xb = document.getElementById('wsFileX_' + ctx);
+    if (xb) xb.innerHTML = fvHtmlBtnHtml();
+    fvHtmlLoad(path, ctx, function () {
+      return wsFileCur === path && wsFileCurBox === ctx && !!document.getElementById(ctx);
+    }, u);
+  }
 }
 // file 标签内的文件 URL：默认 inline（预览口径，PDF/图片/音视频才渲染得出来）；
 // 下载队列复用同一函数时显式传 false，保持 octet-stream + attachment。
@@ -8087,7 +8722,9 @@ var fvList=[], fvIdx=-1;
 var FV_IMG=['png','jpg','jpeg','gif','webp','bmp','svg','ico','avif'];
 var FV_VID=['mp4','webm','mov','m4v'];
 var FV_AUD=['mp3','wav','ogg','m4a','flac','aac'];
-var FV_TXT=['txt','md','markdown','log','json','js','ts','jsx','tsx','py','html','htm','css','csv','tsv','yml','yaml','toml','ini','conf','cfg','sh','bat','ps1','xml','sql','java','c','h','cpp','hpp','go','rs','rb','php','vue','lua','env','gitignore','dockerfile','makefile','properties'];
+// html/htm 从 FV_TXT 里摘出来单列（2026-10-16）：双击不再只看源码，而是真渲染成网页。
+var FV_HTML=['html','htm'];
+var FV_TXT=['txt','md','markdown','log','json','js','ts','jsx','tsx','py','css','csv','tsv','yml','yaml','toml','ini','conf','cfg','sh','bat','ps1','xml','sql','java','c','h','cpp','hpp','go','rs','rb','php','vue','lua','env','gitignore','dockerfile','makefile','properties'];
 function fvExt(n){ n=(n||'').toLowerCase(); var m=/\.([^.]+)$/.exec(n); return m?m[1]:n; }
 function fvKind(n){
   var e=fvExt(n);
@@ -8095,6 +8732,7 @@ function fvKind(n){
   if(e==='pdf') return 'pdf';
   if(FV_VID.indexOf(e)>=0) return 'vid';
   if(FV_AUD.indexOf(e)>=0) return 'aud';
+  if(FV_HTML.indexOf(e)>=0) return 'html';
   if(FV_TXT.indexOf(e)>=0) return 'txt';
   return 'other';
 }
@@ -8106,12 +8744,79 @@ function fvUrl(name){ return fvFileUrl(name, true); }
 // 下载队列用的 URL：不带 inline，保持 octet-stream + attachment 的下载口径
 function fvDlUrl(name){ return fvFileUrl(name, false); }
 function fvFileUrl(name, inline){
-  var base=fbLastListDir||fbCurrentPath||'';
-  var fp=base?base+'/'+name:name;
+  var fp=fvFullPath(name);
   return '/api/mission-file?topic_id='+encodeURIComponent(currentTopic?currentTopic.id:'')
     +'&file='+encodeURIComponent(fp)+(inline===false?'':'&inline=1');
 }
+// 阅读器只拿得到文件名，目录得从最近一次列出的目录补 —— 与 fvFileUrl 同源。
+function fvFullPath(name){ var base=fbLastListDir||fbCurrentPath||''; return base?base+'/'+name:name; }
 function fvFind(name){ for(var i=0;i<fbFilesData.length;i++){ if(!fbFilesData[i].is_dir&&fbFilesData[i].name===name) return fbFilesData[i]; } return null; }
+// ═══ HTML 预览（2026-10-16）═══════════════════════════════
+// 双击 .html 默认渲染成网页（含同目录的 css/js/图片），头部按钮一键切回源码；选择记在
+// localStorage，下次沿用。渲染走 /api/fs-raw/<b64dir>/<name>：iframe 内页面的相对引用
+// 按 base URL 的“最后一段”替换解析，必须把目录放进路径里才解析得到同级文件。
+// （用 ?file= 形式时 <link href="a.css"> 会被解析成 /api/mission-file?file=a.css ——
+//   目录丢了、参数被吃掉 → 页面只剩骨架没样式。所以先问 /api/file-dir 拿目录。）
+var fvHtmlMode='';
+var FV_HTML_MODE_KEY='fv_html_mode';
+function fvHtmlModeGet(){
+  if(fvHtmlMode) return fvHtmlMode;
+  var m='';
+  try{ m=localStorage.getItem(FV_HTML_MODE_KEY)||''; }catch(e){}
+  fvHtmlMode=(m==='source')?'source':'preview';
+  return fvHtmlMode;
+}
+function fvHtmlModeSet(m){
+  fvHtmlMode=(m==='source')?'source':'preview';
+  try{ localStorage.setItem(FV_HTML_MODE_KEY,fvHtmlMode); }catch(e){}
+  if(fvIsOpen()) fvRender();                              // 大眼阅读器
+  if(typeof wsTabsRender==='function') wsTabsRender();    // 工作区 file 标签
+}
+function fvHtmlToggle(){ fvHtmlModeSet(fvHtmlModeGet()==='preview'?'source':'preview'); }
+// 按钮文案＝“点了会变成什么”（当前状态由页面本身呈现，按钮只需说明下一步）
+function fvHtmlBtnText(){ return fvHtmlModeGet()==='preview'?'源码':'预览'; }
+function fvHtmlBtnTitle(){ return fvHtmlModeGet()==='preview'?'查看 HTML 源码':'渲染成网页（含同目录样式/图片）'; }
+// path 一律是工作区相对完整路径（含子目录）：阅读器只拿得到文件名，
+// 由调用方先用 fvFullPath() 补全再传进来 —— 两处调用方各自知道自己的基准目录，
+// 在这里再猜一次会重复拼接（工作区标签传的本就是完整路径）。
+function fvHtmlLoad(path, boxId, alive, srcUrl){
+  if(typeof alive!=='function') alive=function(){ return true; };
+  var box=document.getElementById(boxId);
+  if(!box) return;
+  if(fvHtmlModeGet()==='source'){
+    box.innerHTML='<div class="fv-info">加载中…</div>';
+    fetch(srcUrl||wsFileUrl(path)).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
+      .then(function(t){
+        if(!alive()) return;
+        var b=document.getElementById(boxId); if(!b) return;
+        b.innerHTML='<pre class="fv-pre">'+esc(t)+'</pre>';
+      })
+      .catch(function(e){
+        if(!alive()) return;
+        var b=document.getElementById(boxId); if(!b) return;
+        b.innerHTML='<div class="fv-info">加载失败: '+esc((e&&e.message)||'')+'</div>';
+      });
+    return;
+  }
+  box.innerHTML='<div class="fv-info">页面加载中…</div>';
+  var du='/api/file-dir?topic_id='+encodeURIComponent(currentTopic?currentTopic.id:'')
+    +'&file='+encodeURIComponent(path);
+  fetch(du).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+    .then(function(d){
+      if(!alive()) return;
+      if(!d||!d.raw) throw new Error('定位文件目录失败');
+      var b=document.getElementById(boxId); if(!b) return;
+      b.innerHTML='<iframe class="fv-frame" src="'+String(d.raw).replace(/"/g,'&quot;')+'" title="HTML 预览"></iframe>';
+    })
+    .catch(function(e){
+      if(!alive()) return;
+      var b=document.getElementById(boxId); if(!b) return;
+      b.innerHTML='<div class="fv-info">页面加载失败: '+esc((e&&e.message)||'')+'</div>';
+    });
+}
+function fvHtmlBtnHtml(){
+  return '<button onclick="fvHtmlToggle()" title="'+esc(fvHtmlBtnTitle())+'">'+fvHtmlBtnText()+'</button>';
+}
 // ═══ 图片查看浮窗（body 级）：缩放 / 拖动 / 双指 / 双击 / ←→ ═══
 // 手法的骨架照抄项目里已验证的 initFlowChartZoom（Pointer Events + pointers Map + 中点锚定）。
 var ivList=[], ivIdx=0, ivSt=null, ivNameTimer=0, ivOrigin=null, ivClosing=0;
@@ -8855,6 +9560,8 @@ function fvDownload(){
 function fvRender(){
   var name=fvList[fvIdx];
   var body=document.getElementById('fvBody');
+  var ebtn=document.getElementById('fvExtraBtns');
+  if(ebtn) ebtn.innerHTML='';   // 类型专属按钮每次渲染重置，免得上个类型的按钮残留
   _pdfDestroy();   // 切换文件/类型时释放上一份 PDF（撤销渲染任务 + 销毁文档），避免内存堆积
   var pb=document.getElementById('fvPrevBtn'), nb=document.getElementById('fvNextBtn');
   if(pb) pb.disabled=fvIdx<=0;
@@ -8865,6 +9572,7 @@ function fvRender(){
   var k=fvKind(name), u=fvUrl(name), uq=u.replace(/"/g,'&quot;');
   if(k==='img'){ body.innerHTML='<img class="fv-img" src="'+uq+'" alt="" onerror="this.outerHTML=\'<div class=&quot;fv-info&quot;>图片加载失败</div>\'">'; }
   else if(k==='pdf'){ if(fvPdfEngine()==='native') fvRenderPdfNative(name, body); else fvRenderPdf(name, body); }
+  else if(k==='html'){ if(ebtn) ebtn.innerHTML=fvHtmlBtnHtml(); fvHtmlLoad(fvFullPath(name),'fvBody',function(){ return fvList[fvIdx]===name && fvIsOpen(); },u); }
   else if(k==='vid'){ body.innerHTML='<video class="fv-media" src="'+uq+'" controls preload="metadata"></video>'; }
   else if(k==='aud'){ body.innerHTML='<div class="fv-info"><div style="margin-bottom:12px">'+esc(name)+'</div><audio src="'+uq+'" controls style="width:min(420px,90%)"></audio></div>'; }
   else if(k==='txt'){
@@ -9529,6 +10237,172 @@ function uiPrompt(cfg){ cfg=cfg||{}; cfg.kind='prompt'; return uiDialog(cfg); }
 function uiConfirm(cfg){ cfg=cfg||{}; cfg.kind='confirm'; return uiDialog(cfg); }
 function uiSelect(cfg){ cfg=cfg||{}; cfg.kind='select'; return uiDialog(cfg); }
 
+// ═══ 文本右键菜单（思考框正文 / 提问卡片 / 输入框）═══
+// 为什么必须自建：桌面壳走 WebView2，而 pywebview 把原生右键菜单关掉了
+// （edgechromium.py: settings.AreDefaultContextMenusEnabled = _state['debug']），
+// 所以壳里右键什么都不弹；键盘 Ctrl+C/V 还能用，但选中的字没有一个"点一下复制"的地方。
+// 三条硬约束：
+//  ① 只在桌面壳（window.pywebview 存在）里接管 —— 浏览器/手机端的原生菜单是好的，不去抢；
+//  ② 菜单自身 mousedown 一律 preventDefault —— 否则一点菜单，焦点就从 textarea 被抢走，
+//     选区当场消失，"复制/剪切"全成空操作；
+//  ③ 读剪贴板优先问 Python（pywebview.api.clipboard_read）：WebView2 里
+//     navigator.clipboard.readText 走 PermissionRequested，pywebview 没接管 ⇒ 默认被拒，
+//     而 Chromium 对普通页面的 execCommand('paste') 一律返回 false。
+var _ctxInfo=null;
+function _ctxInShell(){ return !!(window.pywebview&&window.pywebview.api); }
+// 可编辑宿主（输入框 / 文本域 / contenteditable）；checkbox 这类不参与
+function _ctxEditable(el){
+  if(!el||el.nodeType!==1||!el.closest) return null;
+  var t=el.closest('textarea,input,[contenteditable="true"],[contenteditable=""]');
+  if(!t) return null;
+  if(t.tagName==='INPUT'&&/^(checkbox|radio|file|button|submit|reset|range|color|image|hidden)$/i.test(t.type||'text')) return null;
+  return t;
+}
+// 可读文本容器：命中才弹"复制/全选"
+var _CTX_TEXT_SEL='.bubble,.proc-body,.proc-ask,.think-body,.tool-group-body,.msg-text,.debug-log,pre,code';
+function _ctxTextHost(el){
+  if(!el||el.nodeType!==1||!el.closest) return null;
+  return el.closest(_CTX_TEXT_SEL);
+}
+// 当前选区文字：DOM 选区优先，其次输入框内的选区（textarea 的选区不进 window.getSelection）
+function _ctxSelText(){
+  var w=window.getSelection&&window.getSelection();
+  if(w&&!w.isCollapsed){ var s=String(w); if(s.length) return s; }
+  var ed=_ctxInfo&&_ctxInfo.editable;
+  if(ed&&typeof ed.selectionStart==='number'&&ed.selectionEnd>ed.selectionStart) return String(ed.value||'').slice(ed.selectionStart,ed.selectionEnd);
+  return '';
+}
+function ctxMenuHide(){ var m=document.getElementById('textCtxMenu'); if(m) m.remove(); _ctxInfo=null; }
+document.addEventListener('mousedown',function(e){
+  var m=document.getElementById('textCtxMenu');
+  if(m&&(m===e.target||m.contains(e.target))) return;   // 点菜单自身：放行，别夺焦点
+  ctxMenuHide();
+},true);
+document.addEventListener('keydown',function(e){ if(e.key==='Escape') ctxMenuHide(); },true);
+window.addEventListener('blur',ctxMenuHide);
+window.addEventListener('resize',ctxMenuHide);
+document.addEventListener('scroll',ctxMenuHide,true);
+
+document.addEventListener('contextmenu',function(ev){
+  if(!_ctxInShell()) return;             // 浏览器/手机：原生菜单可用，不接管
+  ctxMenuHide();
+  if(ev.defaultPrevented) return;        // 资产库文件 / 标签页 / 导图 已经各自弹过菜单
+  var ed=_ctxEditable(ev.target);
+  var host=ed?null:_ctxTextHost(ev.target);
+  if(!ed&&!host) return;
+  ev.preventDefault();
+  _ctxInfo={editable:ed,host:host};
+  _ctxBuildMenu(ev.clientX,ev.clientY,!!ed);
+},false);
+
+function _ctxCopyNative(){ try{ return document.execCommand('copy'); }catch(e){ return false; } }
+function _ctxWrite(text,useSel){
+  var ok=false;
+  if(useSel) ok=_ctxCopyNative();        // 有活选区走原生复制（保留选区、无权限问题）
+  if(!ok&&text) fbCopyText(text);        // 兜底：navigator.clipboard → 临时 textarea
+}
+function _ctxSelectAll(){
+  var info=_ctxInfo; ctxMenuHide();
+  if(!info) return;
+  if(info.editable){
+    var el=info.editable;
+    try{
+      el.focus();
+      if(el.tagName==='INPUT'||el.tagName==='TEXTAREA') el.select();
+      else document.execCommand('selectAll');
+    }catch(e){}
+    return;
+  }
+  try{
+    var r=document.createRange(); r.selectNodeContents(info.host);
+    var w=window.getSelection(); w.removeAllRanges(); w.addRange(r);
+  }catch(e){}
+}
+function _ctxWarn(msg){
+  var w=document.getElementById('textCtxWarn');
+  if(!w) return;
+  w.textContent=msg; w.style.display='block';
+  setTimeout(function(){ if(document.body.contains(w)) w.style.display='none'; },1800);
+}
+function _ctxReadWeb(cb){
+  if(navigator.clipboard&&navigator.clipboard.readText){
+    navigator.clipboard.readText().then(function(t){ cb(t==null?'':String(t)); },function(){ cb(null); });
+    return;
+  }
+  cb(null);
+}
+// 粘贴：一律"读出来再插回去"，不用 execCommand('paste')（Chromium 对页面禁用）
+function _ctxPaste(){
+  if(!(_ctxInfo&&_ctxInfo.editable)) return;
+  var done=function(text){
+    if(text==null){ _ctxWarn('读不到剪贴板，请按 Ctrl+V'); return; }
+    var el=_ctxInfo&&_ctxInfo.editable; ctxMenuHide();
+    if(!el||!text) return;
+    el.focus();
+    var ok=false;
+    try{ ok=document.execCommand('insertText',false,text); }catch(e){}   // 走它才能保留撤销栈
+    if(!ok&&typeof el.setRangeText==='function'){
+      var a=(el.selectionStart!=null)?el.selectionStart:(el.value||'').length;
+      var b=(el.selectionEnd!=null)?el.selectionEnd:a;
+      el.setRangeText(text,a,b,'end');
+    }
+    try{ el.dispatchEvent(new Event('input',{bubbles:true})); }catch(e){}
+  };
+  var api=window.pywebview&&window.pywebview.api;
+  if(api&&api.clipboard_read){
+    try{
+      api.clipboard_read().then(function(t){ done(t==null?'':String(t)); },function(){ _ctxReadWeb(done); });
+      return;
+    }catch(e){}
+  }
+  _ctxReadWeb(done);
+}
+function _ctxBuildMenu(x,y,isEditable){
+  var menu=document.createElement('div');
+  menu.id='textCtxMenu';
+  menu.style.cssText='position:fixed;left:'+x+'px;top:'+y+'px;z-index:10002;min-width:150px;padding:4px;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;box-shadow:var(--shadow-md);font-size:12px;color:var(--text);user-select:none;-webkit-user-select:none';
+  // 菜单自身不夺焦点：没有这一句，textarea 一失焦，光标位/选区就没了
+  menu.addEventListener('mousedown',function(e){ e.preventDefault(); });
+  var hasSel=!!_ctxSelText();
+  var items=isEditable?[
+    {label:'撤销',  act:function(){ try{ document.execCommand('undo'); }catch(e){} ctxMenuHide(); }},
+    {label:'重做',  act:function(){ try{ document.execCommand('redo'); }catch(e){} ctxMenuHide(); }},
+    {sep:true},
+    {label:'剪切', on:hasSel, act:function(){ var t=_ctxSelText(); try{ document.execCommand('cut'); }catch(e){} ctxMenuHide(); }},
+    {label:'复制', on:hasSel, act:function(){ var t=_ctxSelText(); ctxMenuHide(); _ctxWrite(t,true); }},
+    {label:'粘贴', act:_ctxPaste},
+    {sep:true},
+    {label:'全选', act:_ctxSelectAll}
+  ]:[
+    {label:'复制', on:hasSel, act:function(){ var t=_ctxSelText(); ctxMenuHide(); _ctxWrite(t,true); }},
+    {label:'复制本段全部', act:function(){ var h=_ctxInfo&&_ctxInfo.host; ctxMenuHide(); if(h) fbCopyText(String(h.innerText||h.textContent||'').trim()); }},
+    {sep:true},
+    {label:'全选', act:_ctxSelectAll}
+  ];
+  for(var i=0;i<items.length;i++){
+    var it=items[i];
+    if(it.sep){ var sp=document.createElement('div'); sp.style.cssText='height:1px;background:var(--border);margin:4px 6px'; menu.appendChild(sp); continue; }
+    var off=(it.on===false);
+    var el=document.createElement('div');
+    el.textContent=it.label;
+    el.style.cssText='padding:6px 12px;border-radius:6px;cursor:'+(off?'default':'pointer')+';color:'+(off?'var(--tdim)':'var(--text)');
+    if(!off){
+      el.onmouseenter=function(){ this.style.background='var(--hover)'; };
+      el.onmouseleave=function(){ this.style.background=''; };
+      el.onclick=(function(f){ return function(){ f(); }; })(it.act);
+    }
+    menu.appendChild(el);
+  }
+  var warn=document.createElement('div');
+  warn.id='textCtxWarn';
+  warn.style.cssText='display:none;padding:5px 12px;color:var(--warn);font-size:11px;max-width:220px';
+  menu.appendChild(warn);
+  document.body.appendChild(menu);
+  var r=menu.getBoundingClientRect();
+  if(x+r.width>window.innerWidth-6)  menu.style.left=Math.max(6,x-r.width)+'px';
+  if(y+r.height>window.innerHeight-6) menu.style.top=Math.max(6,y-r.height)+'px';
+}
+
 // ═══ 文件右键菜单 ═══
 // 移动端"长按"是浏览器合成的 contextmenu：手指抬起后浏览器还可能补一个 click，
 // 那一下既会把刚弹出的菜单关掉，又会被 fbGrid 的 click 处理当成"点开文件/进目录"。
@@ -10127,7 +11001,7 @@ function loadThemeSettings(){
         if(topics[i].id===cache.topicId){ currentTopic=topics[i]; break; }
       }
     }
-    topicTitle.textContent=currentTopic?currentTopic.title:'任务';
+    topicTitle.textContent=dispTitle(currentTopic);
     renderTopics();
     render();
     // 打开时恢复上次浏览位置
@@ -10157,7 +11031,7 @@ function loadThemeSettings(){
   applyBalMode();
   applyWmMode();
   if(wmMode!=='off') updateWmDisplay();
-  try { var br=await fetch('/api/balance'); var bd=await br.json(); updateBalance(bd); } catch(e){}
+  try { await refreshBalance(); } catch(e){}
 
   try { var av=localStorage.getItem(AVATAR_LS_KEY); if(av) userAvatar=av; } catch(e){}
   if(!userAvatar){
@@ -10184,7 +11058,7 @@ function loadThemeSettings(){
   // Auto-select latest topic if none is active
   if(!currentTopic && topics.length>0){
     currentTopic = topics[0];
-    topicTitle.textContent = currentTopic.title || '任务';
+    topicTitle.textContent = dispTitle(currentTopic);
   }
   var loadTid=currentTopic?currentTopic.id:cachedTopicId;
   if(loadTid){
@@ -10236,7 +11110,7 @@ function loadThemeSettings(){
       saveCache();
       restoreScroll(loadTid);
     }
-    topicTitle.textContent=currentTopic?currentTopic.title:'任务';
+    topicTitle.textContent=dispTitle(currentTopic);
   }
   render();
   setupScrollLoad();
@@ -10317,7 +11191,7 @@ function loadThemeSettings(){
     };
   } catch(e){}
   } catch(e){ chatBox.innerHTML='<div class="empty"><div>⚠️ 初始化失败<br><small>'+esc(e.message||'')+'</small></div></div>'; }
-setInterval(function(){ fetch('/api/usage').then(r=>r.json()).then(d=>{ updateToken(d); }).catch(()=>{}); fetch('/api/omp_cost').then(r=>r.json()).then(d=>{ updateCost(d); }).catch(()=>{}); fetch('/api/balance').then(r=>r.json()).then(d=>{ updateBalance(d); }).catch(()=>{}); updateWmDisplay(); checkOmpStatus(); if(!document.hidden) loadTopics(); }, 8000);
+setInterval(function(){ fetch('/api/usage').then(r=>r.json()).then(d=>{ updateToken(d); }).catch(()=>{}); fetch('/api/omp_cost').then(r=>r.json()).then(d=>{ updateCost(d); }).catch(()=>{}); refreshBalance(); updateWmDisplay(); checkOmpStatus(); if(!document.hidden) loadTopics(); }, 8000);
 })();
 
 // Check if current topic has an active AI working session
@@ -10491,6 +11365,11 @@ function _seedTail(tid,lastId,working){
   // 顺手同步按钮，否则"切回正在跑的任务"要等到下一次 3s 探针才把按钮立红。
   // 只在播种的对象就是当前任务时同步 —— 预加载别的任务不许动当前任务的按钮。
   try{ if(currentTopic&&currentTopic.id===tid) _syncSendBtn(tid); }catch(e){}
+  // 兼做一件事：此刻 messages 刚被服务端数据**整份替换**（结论视图重取 / 切任务 / 全量加载），
+  // 正是"未送达存档"对账的最佳时点 —— 同 cmid 带服务端 id 就说明这条真送达了。
+  // 放在这里而不是调用方，是为了让所有"从服务端拉过"的路径都自动覆盖到（含预加载分支，
+  // applyPending 自己有 currentTopic 守卫，不会动别的任务）。2026-10-09
+  try{ applyPending(tid); }catch(e){}
 }
 
 // 就地更新末尾占位的"最后一步"（不重取消息；render 按签名短路，内容没变不会白重建）
@@ -11882,7 +12761,7 @@ function initFlowChartZoom(viewport){
 async function openFlowChart(){
   if(!currentTopic) return;
   var modal=document.getElementById('flowChartModal'), content=document.getElementById('flowChartContent');
-  modal.classList.add('show'); content.innerHTML='<div style="padding:20px;text-align:center;color:var(--tdim)">加载中…</div>';
+  modal.classList.add('show'); _fcPushHistoryGuard(); content.innerHTML='<div style="padding:20px;text-align:center;color:var(--tdim)">加载中…</div>';
   if(_fcGraph){ try{_fcGraph.dispose();}catch(_){} _fcGraph=null; }
   try{
     var tid=currentTopic.id;
@@ -11909,7 +12788,7 @@ async function openFlowChart(){
 +'<button id="fcSettingsBtn" onclick="fcToggleSettings()" style="font-size:11px;padding:2px 8px;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer" title="画布设置"> 设置</button>'
        +'<button id="fcEditBtn" onclick="fcToggleEdit()" style="font-size:11px;padding:3px 8px;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer" title="切换编辑模式">✏️ 编辑</button>'
        +'<button id="fcSaveBtn" onclick="fcSave()" style="font-size:11px;padding:3px 8px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer" title="保存修改">💾 保存</button>'
-       +'<button onclick="document.getElementById(\'flowChartModal\').classList.remove(\'show\')" style="font-size:11px;padding:2px 8px;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer" title="关闭">✕</button>'
+       +'<button onclick="closeFlowChart()" style="font-size:11px;padding:2px 8px;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer" title="关闭">✕</button>'
        +'</div>'
        // ── 设置面板（默认隐藏，点击⚙展开） ──
        +'<div id="fcSettingsPanel" style="display:none;flex:0 0 auto;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--surface2);gap:6px;flex-wrap:wrap;align-items:center">'
@@ -12036,12 +12915,33 @@ function _buildTreeFromX6(x6data){
   return root;
 }
 
+// ── 移动端返回支持（2026-10-16）────────────────────────────
+// 手机上没 Esc 键，弹窗在窄屏又是全屏的（点不到遮罩），原先只能靠画布顶栏那个小 ✕。
+// Android WebView 的返回键只走 history，不会派发 keydown；而页面只有一条历史记录时
+// canGoBack()=false，返回键直接被系统吃掉。做法：开弹窗时压一条 history，
+// 返回键 popstate 时关弹窗，而不是离开页面。
+var _fcHistoryPushed=false;
+function _fcPushHistoryGuard(){
+  if(_fcHistoryPushed) return;
+  try{ history.pushState({fcModal:1},''); _fcHistoryPushed=true; }catch(_){}
+}
 function closeFlowChart(e){
-  if(!e||e.target===document.getElementById('flowChartModal')){
-    document.getElementById('flowChartModal').classList.remove('show');
-    if(_fcGraph){ try{_fcGraph.dispose();}catch(_){} _fcGraph=null; }
+  if(e && e.target!==document.getElementById('flowChartModal')) return;
+  var m=document.getElementById('flowChartModal'); if(!m) return;
+  m.classList.remove('show');
+  if(_fcGraph){ try{_fcGraph.dispose();}catch(_){} _fcGraph=null; }
+  // 把为弹窗压进去的那条历史记录吐掉，否则再按返回键会被一个已经关掉的弹窗吃掉一次
+  if(_fcHistoryPushed){
+    _fcHistoryPushed=false;
+    try{ history.back(); }catch(_){}
   }
 }
+window.addEventListener('popstate',function(){
+  var m=document.getElementById('flowChartModal');
+  if(!m || !m.classList.contains('show') || !_fcHistoryPushed) return;
+  _fcHistoryPushed=false;   // 这条记录已被返回键消费
+  closeFlowChart();
+});
 
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;'); }
 
@@ -13961,6 +14861,10 @@ async function switchModel(provider, modelId) {
     if (data.success) {
       // Refresh model list to update UI
       await loadModelConfig();
+      // 换源了：顶栏余额要立刻跟到新源（force 跳过服务端 120s 全局缓存，
+      // 否则最长两分钟内还显示旧源的钱）。当前任务若钉了自己的模型，
+      // refreshBalance() 取的是该任务级的数，不受影响。
+      try { await refreshBalance(null, true); } catch(e){}
     } else if (data.code === 'local_not_running') {
       // 竞态兜底：预检时还在、切的时候没了
       alert('本地推理服务未启动，请先在「本地模型服务」里点「启动」再切换。');
@@ -14531,7 +15435,7 @@ document.addEventListener('keydown',function(e){
   }
   if(e.key!=='Escape') return;
   var shown=document.querySelector('.modal-overlay.show');
-  if(shown){ shown.classList.remove('show'); return; }
+  if(shown){ if(shown.id==='flowChartModal'){ closeFlowChart(); } else { shown.classList.remove('show'); } return; }
   if(fbOpen&&xferPanelOpen){ toggleXferPanel(false); return; }
   if(fbOpen&&fbSelected.length){ clearFileSelection(); return; }
   if(assetOpen){ closeAssetView(); return; }
@@ -14542,7 +15446,7 @@ document.addEventListener('keydown',function(e){
 
 // ── Periodic balance fetch (every 5 minutes) ──────
 setInterval(function(){
-  fetch('/api/balance').then(function(r){return r.json();}).then(function(d){updateBalance(d);}).catch(function(){});
+  refreshBalance();
 }, 300000);
 
 	// ── Fragment graph visualization ────────────────
@@ -15876,7 +16780,7 @@ var QRCode;!function(){function a(a){this.mode=c.MODE_8BIT_BYTE,this.data=a,this
  <div id="wpChip" onclick="wpMinimize(false)">
    <img id="wpChipFav" alt="" onerror="this.style.visibility='hidden'" onload="this.style.visibility='visible'"><span class="wp-chip-t" id="wpChipT"></span><span class="wp-chip-x" onclick="event.stopPropagation();wpChipClose()">✕</span>
  </div>
-<script src="/task-composer.js?v=20261008-modelsearch"></script>
+<script src="/task-composer.js?v=20261016-recentmodel"></script>
 <script src="/composer-floating.js?v=20261007-ios-smooth2"></script>
 </body>
 </html>

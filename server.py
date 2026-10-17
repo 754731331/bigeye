@@ -95,6 +95,67 @@ import tools.spawn_agent
 import tools.order_memory_tools  # OM秩序记忆（秩学习规则，Phase1）  # 子代理工具（spawn_agent）
 import tools.rules_engine_tools  # 规则引擎管理工具（rule_list/rule_add/rule_update/rule_delete）
 import tools.audit_guard  # 坑指纹核查工具（audit_check：动作前比对事件账本历史坑）
+import tools.tool_output  # 有界结果引用：read_tool_output（翻页读超限输出）/ tool_output_stats
+import tools.see_image  # 看图：磁盘图片/视频帧 → 多模态模型（折叠分组 vision）。2026-10-16：漏登记导致重启后工具消失
+
+try:
+    import tool_outputs as _tool_output_store  # 超限工具输出落盘（改造②）
+except Exception:
+    _tool_output_store = None
+
+
+def _unwrap_result_payload(s):
+    """剥掉 registry.execute_tool 加的单键 {"result": {...}} 包装，返回 (payload_json, 是否剥过)。
+
+    2026-10-17 定位：execute_tool 统一 `return {"result": result}`，这层壳落盘后
+    模型按工具真实字段名调用 read_tool_output(field="stdout"/"content") 会直接报
+    「字段不存在，可用: ['result']」——任务 6d895c38e809 里实测踩到（消息 [1946]）。
+    剥壳后摘要里的 head 也更可读（少一层嵌套），字段名与工具原始返回一致。
+
+    只在"单键 + result 值是 dict/list"时剥，业务字段本身叫 result 且是标量/字符串
+    的不动（那种情况 field="result" 仍然可用）。
+    """
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return s, False
+    depth = 0
+    while (isinstance(obj, dict) and len(obj) == 1
+           and isinstance(obj.get("result"), (dict, list)) and depth < 3):
+        obj = obj["result"]
+        depth += 1
+    if depth == 0:
+        return s, False
+    try:
+        return json.dumps(obj, ensure_ascii=False), True
+    except Exception:
+        return s, False
+
+
+def _save_bounded_ref(result_json, tid, tool_name, raw_result):
+    """把超限工具输出落盘成有界引用，返回摘要 dict；**失败返回 None 由调用方回退旧截断**。
+
+    2026-10-15 改造②：原行为是原地砍中间（丢弃部分永久丢失）。
+    纪律：落盘异常绝不允许导致工具结果丢失 → 必须回退。
+    """
+    if _tool_output_store is None:
+        return None
+    try:
+        # 2026-10-17：落盘就剥壳，别把 registry 的 {"result": X} 带进引用库
+        _payload, _unwrapped = _unwrap_result_payload(result_json)
+        return _tool_output_store.save(
+            _payload, topic_id=tid, tool_name=tool_name,
+            is_json=isinstance(raw_result, dict) or _unwrapped,
+        )
+    except Exception:
+        try:
+            _tool_output_store._log_degrade(
+                f"_save_bounded_ref raised for {tool_name} len={len(result_json)}")
+        except Exception:
+            pass
+        return None
+
+
 
 
 def _get_matters(tid=None):
@@ -1914,6 +1975,12 @@ def _vision_fallback_enabled() -> bool:
 # 所以默认把同源重试拉长到 10 次 —— 能靠等待自愈的就不要换源（换源有副作用）。
 LLM_TURN_RETRY_MAX = 10
 
+# 需要回传 reasoning_content 的源：{(base_url, model)}。
+# 思考模型（LiteLLM 代理的 deepseek-v4.1-flash-1017 等）要求带 tool_calls 的
+# assistant 消息原样回传本轮 reasoning_content，否则 HTTP 400。实测补字段即 200。
+# 一旦某个源报过这个错，就记住它，后续轮次在组装消息时直接带上，不再白挨 400。
+_REASONING_ECHO_MODELS = set()
+
 
 def _auto_fallback_enabled() -> bool:
     """主模型持续不可用时，是否允许沿 fallback_chain 自动换源（**默认关闭**）。
@@ -1975,6 +2042,51 @@ def _prepare_vision_request(llm_config, message, image_abs_paths):
     message = (message + "\n" + note).strip()
     print(f"[vision] no fallback: {why}")
     return llm_config, message, None, note
+
+
+# ── 最近使用的模型（输入框模型面板置顶用）─────────────────
+# 存在 meta 全局键里：跨任务、跨设备共享（手机端也看得到同一条最近列表）。
+# 只存 provider + model id 两个字段，渲染时再跟当前模型列表对齐 ——
+# 源被删/模型下线时自动从最近列表里消失，不会留下点不动的死条目。
+_RECENT_MODELS_KEY = "recent_models_v1"
+_RECENT_MODELS_MAX = 6
+
+
+def _load_recent_models(db):
+    try:
+        raw = db.get_meta(_RECENT_MODELS_KEY)
+        arr = json.loads(raw) if raw else []
+        return arr if isinstance(arr, list) else []
+    except Exception:
+        return []
+
+
+def _push_recent_model(db, provider, model):
+    """把刚选的模型挪到最近列表最前（去重，最多 6 条）。"""
+    arr = [x for x in _load_recent_models(db)
+           if not (isinstance(x, dict) and x.get("provider") == provider and x.get("model") == model)]
+    arr.insert(0, {"provider": provider, "model": model})
+    arr = arr[:_RECENT_MODELS_MAX]
+    try:
+        db.set_meta(_RECENT_MODELS_KEY, json.dumps(arr, ensure_ascii=False))
+    except Exception as e:
+        print(f"[models] save recent failed: {e}")
+    return arr
+
+
+def _recent_model_view(db, models):
+    """把最近记录映射成完整模型对象（含 name/available/current），过滤已失效的。"""
+    by = {}
+    for m in models or []:
+        by[(m.get("provider"), m.get("id") or m.get("model"))] = m
+    out = []
+    for r in _load_recent_models(db):
+        m = by.get((r.get("provider"), r.get("model")))
+        if m and m not in out:
+            out.append(m)
+        if len(out) >= _RECENT_MODELS_MAX:
+            break
+    return out
 
 
 def _build_model_list(cfg) -> list[dict]:
@@ -2333,6 +2445,71 @@ def clear_working(tid):
         pass
 
 
+# ── 未命名任务的标题兜底（纯显示层）────────────────────────────
+# 场景：我（AI）还没抓出意图命名（title 仍是 '新任务'），但用户已经提问了。
+# 此时侧栏/标题栏不该只显示"新任务"——一堆任务全同名，用户分不清谁是谁。
+# 用用户第一条真正的提问内容做**显示名**，截断到 24 字。
+#
+# 铁律：只加 display_title 字段，**绝不改 db.title**。原因：
+#   1. rules_engine/rules.json 的 topic_unnamed 规则靠 topic_title == '新任务'
+#      触发"此任务未命名，先抓意图"的提醒；改了 title 这条规则就永远不响了。
+#   2. 我判断任务身份也看 title，不能被显示层污染。
+# 一旦有正式标题，前端优先用 title，display_title 自动失效（无需清理）。
+_TITLE_DEFAULT = ("", "新任务", "新话题", "任务", "未命名")
+_TITLE_MAX = 24
+
+
+def is_default_title(title):
+    """标题是否仍是"没身份"的默认值。"""
+    return str(title or "").strip() in _TITLE_DEFAULT
+
+
+_ATTACH_RE = re.compile(r"\[附件[^\]]*\]|\[[^\]]*\.(?:png|jpe?g|gif|webp|bmp|mp4|mp3|wav|pdf|docx?|xlsx?|zip|txt)(?:\s*->[^\]]*)?\]\s*", re.I)
+
+
+def clip_title(text, limit=_TITLE_MAX):
+    """压空白 + 剥掉附件标记 + 超长截断（带省略号）。"""
+    s = _ATTACH_RE.sub(" ", str(text or ""))
+    s = " ".join(s.split())
+    if not s:
+        return ""
+    if len(s) > limit:
+        s = s[:limit] + "…"
+    return s
+
+
+def pick_title_text(msg_list):
+    """从用户消息里挑第一条能当标题的（跳过纯附件/图片/提醒占位）。"""
+    for m in (msg_list or []):
+        s = clip_title(m)
+        if not s:
+            continue
+        if s.startswith("⏰"):
+            continue
+        return s
+    return ""
+
+
+def attach_display_title(topics, db=None):
+    """给仍是默认标题的任务补一个 display_title（只读、不落库）。
+
+    只查 title 为默认值的那几个任务，命中索引，开销可忽略。
+    """
+    try:
+        need = [t for t in (topics or []) if is_default_title(t.get("title"))]
+        if not need:
+            return topics
+        db = db or get_db()
+        m = db.first_user_messages([t.get("id") for t in need])
+        for t in need:
+            txt = pick_title_text(m.get(t.get("id")))
+            if txt:
+                t["display_title"] = txt
+    except Exception:
+        pass
+    return topics
+
+
 def attach_action_needed(topics):
     """给「AI 正在等用户回答」的任务打 action_needed 标记（侧栏黄底黑字标签用）。
 
@@ -2538,6 +2715,11 @@ def _fetch_cny_rate():
 # ── Balance cache ────────────────────────────────────
 _balance_cache = (0, None)
 _balance_cache_lock = threading.Lock()
+# 任务级余额缓存：顶栏在任务里显示的是「该任务钉住的源」的余额。
+# 不能用单槽缓存 —— 多任务交替切模型时两个源会互相盖掉对方的数。
+# TTL 比全局短（30s）：切模型后要很快看到新源的数。
+_balance_task_cache = {}
+_BALANCE_TASK_TTL = 60
 _total_spent_cny = 0.0
 _last_balance_cny = 0.0
 _balance_provider = None  # 余额基线所属供应商；切换供应商时重置基线不累计消费
@@ -2607,8 +2789,11 @@ def _balance_auth_for(cfg):
     return None
 
 
-def _balance_now():
-    """实时查询当前供应商余额（无缓存）。返回 (余额 float|None, 币种, 来源)。
+def _balance_now(tid=None):
+    """实时查询供应商余额（无缓存）。返回 (余额 float|None, 币种, 来源)。
+
+    tid 非空＝查该任务钉住的模型所属源（输入框里切了模型，顶栏金额要跟着走）；
+    tid 为空＝维持原语义，查全局默认源。
 
     统一走 custom_providers.query_balance：内置源（DeepSeek / 智谱 / OpenRouter…）
     与用户自己加的第三方源吃**同一套厂商适配器**，所以切到第三方源后顶栏余额
@@ -2619,7 +2804,7 @@ def _balance_now():
     relay 能覆盖 one-api 系（第三方站的绝大多数）且最多 4 个请求。
     """
     try:
-        cfg = get_model_config()
+        cfg = get_task_model_config(tid) if tid else get_model_config()
         api_key = cfg.api_key
         if not api_key:
             return None, "", ""
@@ -2638,10 +2823,35 @@ def _balance_now():
     return None, "", ""
 
 
-def _query_balance(force=False):
-    """Query current provider balance API, cached 120s."""
+def _query_balance(force=False, tid=None):
+    """Query balance API, cached.
+
+    tid 为空：全局源，缓存 120s，并维护消费基线（历史行为不变）。
+    tid 非空：该任务钉住的源，单独缓存 60s，**不动消费基线** ——
+        基线是「某个源的钱变少了＝花了多少」的差量推算，多任务在两个不同源之间
+        来回切会把两个池子的余额差算成消费（曾把 ¥10 防抖逻辑搞出垃圾数据）。
+    """
     global _total_spent_cny, _last_balance_cny, _balance_cache
     now = time.time()
+    if tid:
+        with _balance_cache_lock:
+            hit = _balance_task_cache.get(tid)
+            if not force and hit and now - hit[0] < _BALANCE_TASK_TTL:
+                return hit[1]
+        balance_data = None
+        now_bal, cur_code, src = _balance_now(tid)
+        cur_code = (cur_code or "").upper()
+        if now_bal is not None:
+            balance_data = {
+                "is_available": True,
+                "balance_infos": [{"total_balance": str(now_bal),
+                                   "currency": cur_code or "CNY"}],
+                "currency": cur_code or "CNY",
+                "provider": src,
+            }
+        with _balance_cache_lock:
+            _balance_task_cache[tid] = (now, balance_data)
+        return balance_data
     with _balance_cache_lock:
         if not force and _balance_cache[0] and now - _balance_cache[0] < 120:
             return _balance_cache[1]
@@ -2691,6 +2901,16 @@ def _query_balance(force=False):
     return balance_data
 
 
+def _invalidate_task_balance(tid):
+    """把某个任务的余额缓存作废（该任务刚在输入框里换了模型）。
+    只清这一个任务的，别人的数不动。
+    """
+    if not tid:
+        return
+    with _balance_cache_lock:
+        _balance_task_cache.pop(tid, None)
+
+
 def _invalidate_balance():
     """切源 / 改源 / 删源之后必须清余额缓存。
 
@@ -2698,10 +2918,13 @@ def _invalidate_balance():
     用户切到第三方源后顶栏会一直显示**旧源**的余额（最长 120 秒），
     看起来就像新源的钱被算错了。顺手起个后台线程立刻查一次，
     让顶栏马上换成新源的数（或换成"—"）。
+
+    任务级缓存一并清空：任务钉的那个模型可能就在被改的源上。
     """
     global _balance_cache, _balance_provider, _balance_currency
     with _balance_cache_lock:
         _balance_cache = (0, None)
+        _balance_task_cache.clear()
     _balance_provider = None
     _balance_currency = ""
     try:
@@ -2991,6 +3214,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 t["loop_active"] = True
                 except Exception:
                     pass
+                # 未命名任务：用用户第一条提问做**显示名**（只加 display_title，不动 title）
+                attach_display_title(topics, self.db)
                 # 「需要你动作」同步：AI 正在阻塞提问等回答的任务 → 侧栏右上角黄底黑字标签
                 attach_action_needed(topics)
                 self._json(200, {"topics": topics or [], "active": active})
@@ -3007,6 +3232,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except Exception:
                     lim = 60
                 hits = self.db.search(q, limit=lim) if q else []
+                attach_display_title(hits, self.db)   # 未命名任务：显示名兜底（只加字段）
                 self._json(200, {"query": q, "count": len(hits), "hits": hits})
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -3172,8 +3398,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             tid = params.get('topic_id', [''])[0]
             try:
                 cfg = get_task_model_config(tid)
+                _models = _build_model_list(cfg)
                 self._json(200, {'topic_id': tid, 'provider': cfg.provider, 'model': cfg.model,
-                                 'models': _build_model_list(cfg), 'usage': task_runtime.usage(tid)})
+                                 'models': _models, 'recent': _recent_model_view(self.db, _models),
+                                 'usage': task_runtime.usage(tid)})
             except Exception as e:
                 self._json(400, {'error': str(e)})
         elif path == "/api/models":
@@ -3252,7 +3480,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # ── Balance ──
         elif path == "/api/balance":
-            bd = _query_balance()
+            # topic_id 非空＝要该任务钉住的源的余额（顶栏在任务里跟着输入框切的模型走）。
+            # 不传就退回全局源，老客户端行为不变。
+            tid = (params.get("topic_id", [""])[0] or "").strip()
+            _force = (params.get("force", [""])[0] or "") in ("1", "true")
+            bd = _query_balance(force=_force, tid=tid or None)
             if bd and bd.get("is_available"):
                 info = bd.get("balance_infos", [{}])[0]
                 self._json(200, {
@@ -3261,9 +3493,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "granted_balance": info.get("granted_balance", "0.00"),
                     "topped_up_balance": info.get("topped_up_balance", "0.00"),
                     "provider": bd.get("provider", ""),
+                    "topic_id": tid,
                 })
             else:
-                self._json(200, {"total_balance": "0.00", "currency": "CNY", "error": "unavailable"})
+                self._json(200, {"total_balance": "0.00", "currency": "CNY", "error": "unavailable", "topic_id": tid})
 
         # ── Banner settings ──
         elif path == "/api/settings/banner":
@@ -3831,6 +4064,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
 
         # ── Mission files (list) ──
+        # ── 工作区（只读：输入框旁「工作区外访问」按钮取状态用；不列目录，故不用 mission-files）──
+        elif path == "/api/workspace":
+            try:
+                _tid = params.get("topic_id", [""])[0]
+                _allow = bool(_tid) and (self.db.get_topic_meta(_tid, "allow_outside") == "1")
+                _ws_rel = self.db.get_topic_meta(_tid, "workspace") if _tid else ""
+                _ws_abs = ""
+                if _tid:
+                    try:
+                        _ws_abs = os.path.abspath(_resolve_workspace(_ws_rel, _tid))
+                    except Exception:
+                        _ws_abs = ""
+                self._json(200, {"allow_outside": _allow, "workspace": _ws_abs})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
         elif path.startswith("/api/mission-files"):
             tid = params.get("topic_id", [""])[0]
             subdir = params.get("subdir", [""])[0]
@@ -3862,6 +4110,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         files.append({"name": name, "is_dir": os.path.isdir(full),
                                       "size": 0, "mtime": 0})
             _allow_outside = (self.db.get_topic_meta(tid, "allow_outside") == "1")
+            # ── ⑳ 目录指纹模式（?sig=1）：自动刷新专用 ──────────────────────
+            # 稳态轮询每 2.5s 一次，若每次都把整个 files 列表序列化 + 传输，
+            # 大目录就是纯浪费。这里只回一个指纹：前端指纹没变 ⇒ 一个字节都不动 DOM。
+            # ⚠️ 不带 sig=1 的老调用点行为完全不变（仍返回全量）；前端也兼容"没实施指纹"的
+            #    老服务端（响应里直接带 files，就用前端本地指纹顶上）⇒ 这一段可独立上线。
+            #
+            # 🔴 这里的算法必须与前端 fbArSigLocal() **逐字节一致**，三处口径都要对齐：
+            #    ① 累积方式：_h 逐字符累进且**跨条目不重置**。若每项都从初值重算再覆盖，
+            #       就等于"只看最后一个条目"——目录里放 a.txt+b.txt 与只放 b.txt 会撞出同一个值。
+            #    ② 数值截断：这里用 int() 向零截断，前端必须用 Math.floor，不能用 Math.round
+            #       （1.4 两者相同，但 1.6 会分别是 1 和 2，值就错开了）。
+            #    ③ 排序：按 name 升序，两端都必须先排序再算。
+            #    口径不一致时，前端每轮都判成"变了" ⇒ 自动刷新退化成"每 2.5s 全量拉取 +
+            #    全量重排"，比不做还糟（实测踩过：累积写成覆盖导致两端永久对不上）。
+            if params.get("sig", ["0"])[0] == "1":
+                _h = 2166136261
+                try:
+                    for _f in sorted(files, key=lambda x: x["name"]):
+                        _s = "%s|%d|%d|%d" % (_f["name"], 1 if _f["is_dir"] else 0,
+                                               int(_f["size"] or 0), int(_f["mtime"] or 0))
+                        for _ch in _s:
+                            _h = ((_h ^ ord(_ch)) * 16777619) & 0xFFFFFFFF
+                        _h = ((_h ^ len(_s)) * 16777619) & 0xFFFFFFFF
+                    # 前缀带项数：少一项/多一项必然改值（哈希碰撞概率可忽略）
+                    _sig = "%d-%08x" % (len(files), _h)
+                except Exception:
+                    _sig = ""
+                self._json(200, {"sig": _sig, "n": len(files), "subdir": subdir})
+                return
             self._json(200, {"files": files, "workspace": os.path.abspath(ws_path), "subdir": subdir, "mission_dir": mission_dir, "allow_outside": _allow_outside})
         # ── Mission file (download / inline preview) ──
         elif path.startswith("/api/mission-file"):
@@ -3880,6 +4157,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._serve_file(filepath, inline=_inline)
             else:
                 self._json(404, {"error": "file not found"})
+
+        # ── 文件所在目录（HTML 预览用）: /api/file-dir?topic_id=&file= ──
+        # 返回 {"dir": 绝对目录, "name": 文件名}。路径解析与 /api/mission-file 完全一致
+        # （工作区优先 → 回退 mission 目录）。前端拿到绝对目录后再拼
+        # /api/fs-raw/<b64dir>/<name> 作为 iframe src —— 目录必须是绝对且正确的，
+        # 否则页面里的相对引用解析不到同级 css/js/图片。
+        elif path == "/api/file-dir":
+            tid = params.get("topic_id", [""])[0]
+            filename = params.get("file", [""])[0]
+            ws_rel = self.db.get_topic_meta(tid, "workspace")
+            ws_path = _resolve_workspace(ws_rel, tid)
+            filepath = os.path.join(ws_path, filename)
+            if not (os.path.exists(filepath) and os.path.isfile(filepath)):
+                filepath = os.path.join(ROOT_DIR, "data", "missions", tid, filename)
+            if os.path.exists(filepath) and os.path.isfile(filepath):
+                ap = os.path.abspath(filepath)
+                seg = base64.urlsafe_b64encode(
+                    os.path.dirname(ap).encode("utf-8")).decode("ascii").rstrip("=")
+                self._json(200, {"dir": os.path.dirname(ap),
+                                 "name": os.path.basename(ap),
+                                 "raw": "/api/fs-raw/" + seg + "/" + urllib.parse.quote(os.path.basename(ap))})
+            else:
+                self._json(404, {"error": "file not found"})
+
+
+        # 必须走 path-style，不能复用上面的 ?file= 形式（2026-10-16）：
+        #   iframe 里页面的相对引用（<link href="a.css">、<img src="img/b.png">）
+        #   是按 base URL 的"最后一段"替换解析的
+        #   —— base = /api/fs-raw/<b64dir>/index.html
+        #      → a.css 解析成 /api/fs-raw/<b64dir>/a.css    ✓ 子目录保住
+        #   —— 若 base = /api/mission-file?file=sub/index.html
+        #      → a.css 解析成 /api/mission-file?file=a.css  ✗ 目录丢了、参数被整个替换
+        #   只用 query 形式时页面必然"只有骨架、没样式没图"，且 file 参数被吃掉。
+        # b64dir = 文件所在目录的绝对路径（urlsafe base64，去 padding）；
+        # relpath 可为空（空则回目录本身 → 404）。用 ../ 上溯也在同一路径空间里，
+        # 能力面与 /api/mission-file 一致（本地单用户应用的本地文件服务）。
+        elif path.startswith("/api/fs-raw/"):
+            try:
+                rest = path[len("/api/fs-raw/"):]
+                seg, _, rel = rest.partition("/")
+                pad = "=" * (-len(seg) % 4)
+                dir_abs = base64.urlsafe_b64decode(seg + pad).decode("utf-8")
+                if not os.path.isabs(dir_abs):
+                    self._json(400, {"error": "dir must be absolute"})
+                    return
+                target = os.path.normpath(
+                    os.path.join(dir_abs, urllib.parse.unquote(rel)))
+                if not (os.path.exists(target) and os.path.isfile(target)):
+                    self._json(404, {"error": "file not found"})
+                    return
+                self._serve_file(target, inline=True)
+            except Exception as e:
+                self._json(400, {"error": str(e)})
 
 
         # ── Debug: history stats ──
@@ -4279,6 +4609,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not any(x.get('provider') == provider and (x.get('id') or x.get('model')) == model for x in candidates):
                     raise ValueError('Model is not registered')
                 task_runtime.save_selection(self.db, tid, provider, model)
+                _push_recent_model(self.db, provider, model)
+                # 顶栏金额要跟着这个任务的新模型所属源走：作废该任务的余额缓存。
+                # （不传 topic_id 的旧客户端仍然看全局源，不受影响）
+                _invalidate_task_balance(tid)
                 self._json(200, {'success': True, 'topic_id': tid, 'provider': provider, 'model': model})
             except Exception as e:
                 self._json(400, {'error': str(e)})
@@ -6616,27 +6950,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
                     if non_stories:
                         now_ts = _time.time()
-                        def _score(f):
-                            # 综合权重：weight × 时效衰减 × importance × 同话题加权 × 权威加成
-                            weight = f.get("weight", 1.0)
-                            importance = f.get("importance", 5.0)
-                            # 同话题加权：与 store 层 TOPIC_BONUS_SAME 对齐（双通道一致）
-                            same_topic = 1.2 if (f.get("topic_id") or "") == tid else 1.0
-                            # 时效衰减：30天半衰期
-                            ts_str = f.get("ts", "")
-                            if ts_str and len(ts_str) >= 8:
-                                try:
-                                    from datetime import datetime
-                                    ft = datetime.strptime(ts_str[:8], "%Y%m%d").timestamp()
-                                    days = max(0, (now_ts - ft) / 86400)
-                                    recency = 0.5 ** (days / 30)
-                                except Exception:
-                                    recency = 0.5
-                            else:
-                                recency = 0.5
-                            authority_bonus = 1.5 if f.get("authority_level", 0) >= 1 else 1.0
-                            return weight * recency * (importance / 5.0) * same_topic * authority_bonus
-                        non_stories.sort(key=_score, reverse=True)
+                        # 2026-10-15 21:30 修复：删除注入层二次重排，直接沿用 store.recall 的返回顺序
+                        # 依据（同一候选池、仅换排序函数、153 条正样本）:
+                        #   旧 freshness 13.7% < 现役 _score 44.4% < 召回原序 68.6% < 纯 relevance 76.5%
+                        # store 层已完成 relevance 排序 + MMR 去重；注入层再乘 recency^0.10 等因子
+                        # 会跨数量级扰动，把"老而准"的记忆按下去。故此处不再重排。
+                        # 保留：同 topic≤2 多样性裁剪 + 权威知识保底（下方逻辑不变）
                         # 同 topic 最多 2 条，保证多样性
                         topic_count = {}
                         selected = []
@@ -6657,6 +6976,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 selected.extend(_guar)
                         except Exception as _ge:
                             print(f"[memory] guaranteed recall failed: {_ge}")
+                        # ── 旁路注入日志（2026-10-15）──────────────────────
+                        # 规则：绝不往注入正文里加 #id —— 正文是模型读到的 prompt，
+                        # 加可见标记本身就是一次注入干预（弃答 v1/v2 已证净伤害）。
+                        # 所以另落一行日志，零 prompt 改动。
+                        # 这是将来训排序器的唯一数据来源：推了谁 → 后来被引用没 → 任务成没成。
+                        try:
+                            import json as _json, os as _os
+                            _push_rec = {
+                                "ts": _time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "epoch": now_ts,
+                                "topic_id": tid,
+                                "query": (message or "")[:200],
+                                "n_candidates": len(non_stories),
+                                "selected": [
+                                    {
+                                        "id": f.get("id"),
+                                        "layer": f.get("layer") or "core",
+                                        "topic_id": f.get("topic_id"),
+                                        "relevance": round(float(f.get("relevance")
+                                                              or f.get("_relevance") or 0.0), 4),
+                                        "weight": f.get("weight"),
+                                        "importance": f.get("importance"),
+                                        "authority_level": f.get("authority_level", 0),
+                                        "causal": bool(f.get("_causal_propagation")),
+                                        "text_head": (f.get("text") or "")[:60],
+                                    }
+                                    for f in selected
+                                ],
+                            }
+                            _push_log = _os.path.join(
+                                _os.path.dirname(_os.path.abspath(__file__)),
+                                "data", "memory_push_log.jsonl")
+                            with open(_push_log, "a", encoding="utf-8") as _lf:
+                                _lf.write(_json.dumps(_push_rec, ensure_ascii=False) + "\n")
+                        except Exception as _le:
+                            print(f"[memory] push log failed: {_le}")
+
                         mem_lines = []
                         for f in selected:
                             ts = f.get("ts", "")
@@ -7024,6 +7380,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with _cancel_lock:
             _cancel_events[tid] = cancel_evt
         full_thinking = ""
+        # 【2026-10-17】full_thinking 是"整段 agent 会话"的累积值，只用于实时思考泡
+        # 显示（重置会让用户看到的思考内容突然变短/跳段，见 §20 的坑）。
+        # 落库必须用 **本轮** 的增量 _turn_thinking —— 旧实现在每条工具轮消息上都写
+        # 全量累积值，实测单条达 88,512 字符（任务 6d895c38e809，02:52-02:53 一分钟
+        # 内 30+ 条逐条递增），十几轮下来同一条思考链被重复存了几十遍。
+        _turn_thinking = ""
         full_response = ""
         full_intermediate = ""  # 工具轮的动作叙述（"好嘞去抓官网…"），换行累积；最终答案不进这里
         total_input_tokens = 0
@@ -7122,6 +7484,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         _fell_back = []                      # 换源记录，最终报错时告诉用户试过哪些
         while remaining > 0:
             _usage_settlement_id = uuid.uuid4().hex
+            _turn_thinking = ""  # 本轮思考（落库口径；实时泡仍用 full_thinking）
             # ── 每轮自检运行时绑定（防串任务）──
             # 工具层的"我在哪个任务"来自本线程的绑定（tools/task_context）。
             # 一旦绑定丢了，工具层会静默回落到全局活跃任务 = 用户此刻点开的任务，
@@ -7169,6 +7532,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # 兜底估算累加点：不管源给不给 usage 都累计，只有真拿不到真实值时才被采用。
             # 多轮任务必须逐轮累加（每轮 msgs 都在长），只取最后一轮会明显低估；
             # 工具 schema 每轮都随请求发出去，也算进 input —— 工具定义约 13k tok，漏掉会少算一半。
+            # 已识别的严格思考源：后续每轮直接回传，不再先挨一次400。
+            if (llm_config.base_url, llm_config.model) in _REASONING_ECHO_MODELS:
+                for _m in msgs:
+                    if _m.get("role") == "assistant" and _m.get("tool_calls"):
+                        _m.setdefault("reasoning_content", _m.get("_thinking") or "")
             _tool_defs = _get_enabled_tool_defs(tid)
             try:
                 _est_input += _estimate_tokens(msgs) + _estimate_tools_tokens(_tool_defs)
@@ -7179,6 +7547,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 et = event["type"]
                 if et == "thinking_delta":
                     full_thinking += event["delta"]
+                    _turn_thinking += event["delta"]
                     set_working(tid, "thinking", thinking=full_thinking, intermediate=full_intermediate, response=turn_text, turn=turn+1, remaining=remaining)
                 elif et == "text_delta":
                     # turn_text = 当前轮模型说的话（工具轮=动作叙述，最终轮=答案）。
@@ -7231,6 +7600,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # 旧判据把它当"非瞬时"→ 当场 raise → 整个循环死掉，用户只看到"断了"且无提示。
                 # 次数上限 LLM_TURN_RETRY_MAX = 10（用户要求拉长）：重试是零副作用的，
                 # 换源才有副作用，所以"能等就等"。
+                # ── reasoning_content 回传修复（2026-10-17）──
+                # 症状：HTTP 400 LITELLM_ERROR "The `reasoning_content` in the
+                # thinking mode must be passed back to the API."，本轮无任何输出
+                # 就直接中断（实测 10-17 23:11/23:12 B站任务与 CC Switch 任务同时中招）。
+                # 根因：思考模型要求带 tool_calls 的 assistant 消息原样回传本轮
+                # reasoning_content，大眼只发了 content/tool_calls → 上游拒收。
+                # 实测证据（同一模型同一请求三次）：不回传 400/400/400，回传（哪怕空串）
+                # 200/200/200 —— 确定性问题，不是上游抖动，所以"等几秒再重试"没用，
+                # 必须先把消息修好再重发。修好后记住这个源，后续轮次组装时直接带上。
+                _te = str(turn_error).lower()
+                if ("reasoning_content" in _te and "passed back" in _te
+                        and _turn_retries < LLM_TURN_RETRY_MAX
+                        and any(m.get("role") == "assistant" and m.get("tool_calls")
+                                and "reasoning_content" not in m for m in msgs)):
+                    _patched = 0
+                    for _m in msgs:
+                        if _m.get("role") == "assistant" and _m.get("tool_calls") \
+                                and "reasoning_content" not in _m:
+                            _m["reasoning_content"] = _m.get("_thinking") or ""
+                            _patched += 1
+                    try:
+                        _REASONING_ECHO_MODELS.add((llm_config.base_url, llm_config.model))
+                    except Exception:
+                        pass
+                    _turn_retries += 1
+                    print(f"[agent] reasoning_content missing -> patched {_patched} "
+                          f"assistant msg(s), retry immediately ({_turn_retries}/{LLM_TURN_RETRY_MAX})")
+                    full_intermediate = _append_intermediate(
+                        full_intermediate,
+                        "（上游要求回传思考内容（reasoning_content）→ 已自动补齐并重发）")
+                    set_working(tid, "thinking", thinking=full_thinking,
+                                intermediate=full_intermediate, response="",
+                                turn=turn + 1, remaining=remaining)
+                    if _budget_hint_msg and msgs and msgs[-1].get("content") == _budget_hint_msg:
+                        msgs.pop()
+                    continue
                 if _turn_retries < LLM_TURN_RETRY_MAX and is_retryable_llm_error(turn_error):
                     _turn_retries += 1
                     _wait = min(_turn_retries * 2, 8)
@@ -7244,7 +7649,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 turn=turn + 1, remaining=remaining)
                     if _budget_hint_msg and msgs and msgs[-1].get("content") == _budget_hint_msg:
                         msgs.pop()  # 重试前移除本轮预算提示，保持 msgs 干净
-                    time.sleep(_wait)
+                    if cancel_evt.wait(_wait):
+                        break  # 退避期间允许用户取消
                     continue
                 # ② 主模型持续不可用 → 按 fallback_chain 换源，把这一轮跑完（不再杀 loop）。
                 #    fallback_chain 早就在配置里，但此前只用于「切 provider 时取 key」，
@@ -7283,7 +7689,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "",
                     f"· 主模型：{_orig_model}",
                     f"· 错误：{turn_error}",
-                    f"· 已尝试：同源重试 {LLM_TURN_RETRY_MAX} 次",
+                    f"· 已尝试：当前源实际重试 {_turn_retries} 次（上限 {LLM_TURN_RETRY_MAX} 次）",
                 ]
                 if _fell_back:
                     _fb_note_lines.append(
@@ -7303,7 +7709,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _fb_note = "\n".join(_fb_note_lines)
                 try:
                     self.db.add_message(tid, "ai", _fb_note, args=_task_stats_args(),
-                                        thinking=full_thinking, ts=time.time())
+                                        thinking=_turn_thinking, ts=time.time())
                     self.db.update_topic(tid, updated_at=time.time())
                 except Exception as _persist_err:
                     print(f"[agent] persist error note failed: {_persist_err}")
@@ -7404,7 +7810,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if turn_text.strip():
                 full_intermediate = _append_intermediate(full_intermediate, turn_text)
             # Tool calls were made — execute and continue normally
-            assistant_msg = {"role": "assistant", "content": turn_text or None}
+            assistant_msg = {"role": "assistant", "content": turn_text or None,
+                             "_thinking": _turn_thinking}
             tc_list = []
             for tc in turn_tool_calls:
                 tc_list.append({
@@ -7426,7 +7833,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # AI 主动翻阅可用 read_topic_messages 直接 SQL 查到，过程信息折叠但不丢。
             ai_msg_id = self.db.add_message(tid, "ai", turn_text,
                                             args={"tool_calls": tc_list, "turn": turn, "process": True},
-                                            thinking=full_thinking, ts=time.time())
+                                            thinking=_turn_thinking, ts=time.time())
             assistant_msg["_db_id"] = ai_msg_id  # for in-memory update after tool result
             # Execute tools and append results
             print(f"[agent] turn {turn+1}: {[tc['tool_name'] for tc in turn_tool_calls]}")
@@ -7437,6 +7844,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 break
 
             tool_results = []  # (tc, result_json)
+            _sv_pending = []   # self_vision：本轮 see_image(mode=self) 要注入的 (tool_name, 图片路径)
             # ── Streaming output for bash tool: accum chunks into set_working(intermediate) ──
             _tool_stream_lines = []     # list of (stream_type, chunk) pending flush
             _last_push_ts = [0.0]       # list for mutability in closure; throttled flush ~200ms
@@ -7538,12 +7946,50 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     result_json = json.dumps(result, ensure_ascii=False)
 
                 # Prune large tool outputs to avoid context pollution
+                # 2026-10-15 改造②：超限不再原地丢弃，改为落盘成有界引用（r-xxxx）。
+                # 落盘失败**必须回退旧行为**——绝不允许因落盘异常导致工具结果丢失。
                 if len(result_json) > 4000:
-                    result_json = result_json[:1000] + f"\n…[截断 {len(result_json)-4000} 字符，工具输出过长已修剪]…\n" + result_json[-500:]
+                    _ref = _save_bounded_ref(result_json, tid, tc["tool_name"], result)
+                    if _ref is not None:
+                        result_json = json.dumps(_ref, ensure_ascii=False)
+                    else:
+                        result_json = result_json[:1000] + f"\n…[截断 {len(result_json)-4000} 字符，工具输出过长已修剪]…\n" + result_json[-500:]
                 msgs.append({"role": "tool", "tool_call_id": tc["tool_call_id"],
                              "content": result_json})
                 tool_results.append((tc, result_json))
                 loop_detector.record_call(tid, tc["tool_name"], args)
+                # self_vision：see_image(mode=self) 的图片，等本轮工具结果全部回填后
+                # 再作为一条 user 图片消息注入（OpenAI 协议 tool 消息不收图，
+                # 且 tool 消息必须紧跟 assistant.tool_calls，不能插在中间）。
+                # 折叠工具经 execute_advanced_tool 返回时会被包成 {"result": {...}}（可能多层），逐层剥开再认标记
+                _sv_r = result
+                for _ in range(4):
+                    if isinstance(_sv_r, dict) and "__self_vision__" not in _sv_r and isinstance(_sv_r.get("result"), dict):
+                        _sv_r = _sv_r["result"]
+                    else:
+                        break
+                if isinstance(_sv_r, dict) and _sv_r.get("__self_vision__"):
+                    _sv_pending.extend((tc["tool_name"], p) for p in _sv_r.get("images") or [])
+
+            # ── self_vision：注入本轮 see_image 收集的图片（仅存内存，不落库）──
+            if _sv_pending and not _vision_capable(llm_config):
+                # 当前模型收不了图：不注入（否则云端 400 / 本地 500），明说而不是假装看到
+                msgs.append({"role": "user", "content":
+                    f"[self_vision] 当前模型 {llm_config.model} 被判定不能收图，"
+                    f"{len(_sv_pending)} 张图未注入。请改用 see_image(mode='proxy')。"})
+                _sv_pending.clear()
+            if _sv_pending:
+                try:
+                    _sv_content = build_multimodal_content(
+                        "[see_image 自视] 以下是你刚请求查看的图片："
+                        + "、".join(os.path.basename(p) for _, p in _sv_pending),
+                        [p for _, p in _sv_pending])
+                    if _sv_content:
+                        msgs.append({"role": "user", "content": _sv_content})
+                        print(f"[self_vision] 注入 {len(_sv_content) - 1} 张图")
+                except Exception as _sv_e:
+                    print(f"[self_vision] 注入失败: {_sv_e}")
+                _sv_pending.clear()
 
             # ── 打转检测：窗口内探索类占比高且零落地类 → 注入提醒 ──
             spin_msg = loop_detector.check_spinning(tid)
@@ -7769,6 +8215,17 @@ def main():
                 print(f"  [overlay] {d}")
     except Exception as e:
         print(f"[大眼X] 写缓冲自愈失败: {e}")
+    # 超限工具输出引用库：启动清理过期引用（TTL 24h）+ 建表
+    # 2026-10-15 改造②。失败不影响启动（落盘时会自动重建）
+    try:
+        import tool_outputs as _tos
+        _tos.init_db()
+        _purged = _tos.cleanup()
+        _st = _tos.stats()
+        print(f"[toolrefs] 有界引用库就绪：存量 {_st.get('count', 0)} 条，"
+              f"启动清理 {_purged} 条过期，{_st.get('stored_chars', 0)} 字符")
+    except Exception as e:
+        print(f"[大眼X] 有界引用库初始化失败（超限输出将回退旧截断）: {e}")
     # Start suggestion refresher — 空态 AI 建议池按频率静默刷新
     try:
         threading.Thread(target=_suggestion_refresh_loop, daemon=True).start()

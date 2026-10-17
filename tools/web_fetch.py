@@ -78,7 +78,40 @@ def _try_scrapling(url: str, timeout: int = TIMEOUT) -> str | None:
         return None
 
 
-def _html_to_text(html: str) -> str:
+def _extract_img_urls(html: str, base_url: str = "") -> list[str]:
+    """Extract image URLs from <img>/og:image before tags are stripped.
+    Filters avatars/icons/data-URIs, dedups, caps at 10. (2026-10-16 修复：
+    此前 <img> 被无差别剥掉，模型对网页图片全盲，只能转抄评论区。）"""
+    urls: list[str] = []
+    for m in re.finditer(r'<img[^>]*>', html, flags=re.IGNORECASE):
+        tag = m.group(0)
+        src = re.search(r'(?:data-src|src)\s*=\s*["\']([^"\']+)["\']', tag, flags=re.IGNORECASE)
+        if src:
+            urls.append(src.group(1))
+    for m in re.finditer(r'<meta[^>]*(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]*content=["\']([^"\']+)["\']', html, flags=re.IGNORECASE):
+        urls.append(m.group(1))
+    for m in re.finditer(r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*(?:property|name)=["\'](?:og:image|twitter:image)["\']', html, flags=re.IGNORECASE):
+        urls.append(m.group(1))
+    seen, out = set(), []
+    for u in urls:
+        u = u.strip()
+        if not u or u.startswith("data:"):
+            continue
+        if base_url and not u.startswith(("http://", "https://", "//")):
+            u = urllib.parse.urljoin(base_url, u)
+        if u.startswith("//"):
+            u = "https:" + u
+        if u in seen:
+            continue
+        seen.add(u)
+        # 过滤图标/头像/装饰小图（bfs/archive 是B站视频封面，保留）
+        if re.search(r'(?:icon|logo|sprite|\.svg|blank|pixel|1x1|bfs/face|/avatar|favicon)', u, re.I):
+            continue
+        out.append(u)
+    return out[:10]
+
+
+def _html_to_text(html: str, base_url: str = "") -> str:
     """Strip HTML tags, limit length, clean entities."""
     text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
@@ -93,12 +126,15 @@ def _html_to_text(html: str) -> str:
     text = re.sub(r'&#\d+;', ' ', text)
     if len(text) > 8000:
         text = text[:8000] + f"\n\n... [截断，原文共 {len(text)} 字符]"
+    imgs = _extract_img_urls(html, base_url)
+    if imgs:
+        text += "\n\n[页面图片URL，下载后可用vsee.py看图]\n" + "\n".join("- " + u for u in imgs)
     return text
 
 
 @register_tool(
     name="web_fetch",
-    description="读取网页内容。传入URL返回网页文本。自动尝试多种抓取方式，支持绕过Cloudflare反爬。查看文档/文章/API时使用。",
+    description="读取网页内容。返回网页文本，若页面有图片会附图片URL清单（下载后可配合vsee.py查看）。自动尝试多种抓取方式，支持绕过Cloudflare反爬。查看文档/文章/API时使用。",
     parameters={
         "type": "object",
         "properties": {
@@ -112,28 +148,28 @@ def web_fetch(url: str):
     # Try 1: httpx (modern, fast)
     httpx_html = _try_httpx(url)
     if httpx_html is not None:
-        text = _html_to_text(httpx_html)
+        text = _html_to_text(httpx_html, url)
         if len(text) > 80:
             return f"[{url}]\n{text}"
 
     # Try 2: requests (handles more sites)
     req_html = _try_requests(url)
     if req_html is not None:
-        text = _html_to_text(req_html)
+        text = _html_to_text(req_html, url)
         if len(text) > 80:
             return f"[{url}]\n{text}"
 
     # Try 3: urllib (built-in, no deps)
     urllib_html = _try_urllib(url)
     if urllib_html is not None:
-        text = _html_to_text(urllib_html)
+        text = _html_to_text(urllib_html, url)
         if len(text) > 80:
             return f"[{url}]\n{text}"
 
     # Try 4: Scrapling (bypasses Cloudflare, handles JS-heavy pages)
     scrapling_html = _try_scrapling(url)
     if scrapling_html is not None:
-        text = _html_to_text(scrapling_html)
+        text = _html_to_text(scrapling_html, url)
         if len(text) > 80:
             return f"[{url}] (via Scrapling)\n{text}"
 

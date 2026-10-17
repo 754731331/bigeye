@@ -10,6 +10,17 @@ import base64
 import urllib.request
 import time
 
+# ── SSE 内容饥饿看门狗（2026-10-17）──────────────────────
+# 场景：中转站连接活着、周期性发 keepalive，但内容字节永远不来。
+# 此时 socket recv 永不超时（urlopen timeout 只管单次 recv 空闲）、流永不结束
+# → 读流协程永久挂起，上层基于"抛异常/流结束"的重试、换源、续写判据
+# 永远不会触发。表现：AI 在任务中突然"喾火"，不响应不报错不重连
+# （实测 2026-10-17 任务 d598fb58672a，线程堵死 8 分钟+）。
+# 解法：读流循环内联跟踪"最后一次收到真内容行"的时刻，只有保活没有内容的
+# 窗口超过 SSE_STARVE_TIMEOUT 秒即主动 raise TimeoutError（文案含 "timeout"，
+# 命中 TRANSIENT_MARKERS → 走既有重试→换源→续写链路）。
+SSE_STARVE_TIMEOUT = float(os.environ.get("SSE_STARVE_TIMEOUT", "180"))
+
 # 部分环境（企业 VPN / 抓包软件 / 杀软）会向 HTTPS 链路注入自签名证书，
 # 导致 urllib 默认证书校验失败，DeepSeek 等 API 调用全部报
 # SSL: CERTIFICATE_VERIFY_FAILED。本服务为本地部署，禁用证书校验可接受。
@@ -58,6 +69,11 @@ RETRYABLE_SERVER_MARKERS = (
     "no available channel", "无可用渠道",
     "overloaded", "engine_overloaded", "server is busy",
     "http 429", "rate limit", "too many requests",
+    # 2026-10-17 补：思考模型（tokenrhythm / deepseek-v4.1-flash-1017）在带
+    # tool_calls 的 assistant 消息里要求原样回传 reasoning_content，缺了必返
+    # HTTP 400 LITELLM_ERROR "The `reasoning_content` in the thinking mode must
+    # be passed back to the API"。实测补上字段后立刻 200 —— 属可修可重试。
+    "must be passed back",
 )
 
 # 明确**不可**重试：余额/额度类。重试无意义，必须换源或直接告知用户。
@@ -656,6 +672,14 @@ def _chat_stream_anthropic(config, messages, tools=None, cancel_event=None, veri
     atools = _to_anthropic_tools(_build_tools(tools))
     if atools:
         body["tools"] = atools
+    # ── 源级附加请求体参数（与 OpenAI 路径同款语义）──
+    # 有些 Anthropic 中转站对请求体有额外要求，且**必修不可选**：实测
+    # leaderai.top 的 claude 系列若 body 里没有 metadata 字段，一律返回
+    # 400「我们检测到您的客户端存在异常」（空对象 {} 也能过）——这不是
+    # 可选参数，缺了整个模型就用不了。字段各家不同，由源配置决定，
+    # 这里只负责原样带上。放在最后合并 = 允许源配置覆盖上面的默认值。
+    for _k, _v in (getattr(config, "extra_body", None) or {}).items():
+        body[_k] = _v
 
     log_group = _log_raw_request(url, body, config)
     t0 = time.time()
@@ -695,8 +719,18 @@ def _chat_stream_anthropic(config, messages, tools=None, cancel_event=None, veri
     done_yielded = False
     saw_terminator = False
 
+    _last_content_ts = time.time()  # 饥饿看门狗：最后一次收到真内容的时刻
+
     try:
         for raw_line in resp:
+            # 饥饿检查：只有保活（注释行/ping）没有内容行超过阈值 → 主动断开。
+            # 文案含 "timeout" → 命中 TRANSIENT_MARKERS → 上层按瞬时故障重试/换源。
+            # （socket timeout 只覆盖"完全静默"场景；本检查覆盖"连接活着但内容
+            #   永远不来"场景，两者互补。）
+            if time.time() - _last_content_ts > SSE_STARVE_TIMEOUT:
+                raise TimeoutError(
+                    f"llm stream timeout: SSE content starvation "
+                    f"{time.time() - _last_content_ts:.0f}s (keepalive only, no content)")
             if cancel_event and cancel_event.is_set():
                 resp.close()
                 _log_raw_response(log_group, "cancelled",
@@ -722,6 +756,9 @@ def _chat_stream_anthropic(config, messages, tools=None, cancel_event=None, veri
                 continue
 
             etype = obj.get("type") or ""
+            # ping 是上游保活，不算内容——不喂看门狗（否则永远不触发）
+            if etype != "ping":
+                _last_content_ts = time.time()
 
             if etype == "message_start":
                 for k, v in _norm_usage_anthropic((obj.get("message") or {}).get("usage")).items():
@@ -784,6 +821,8 @@ def _chat_stream_anthropic(config, messages, tools=None, cancel_event=None, veri
         yield {"type": EVENT_ERROR, "error": str(e)}
         return
 
+    # 若是被饥饿看门狗主动掊断的（saw_terminator=False），上层会把它当
+    # "静默斩断"处理：有部分输出→续写；零输出→重试/换源。与既有链路一致。
     if stop_reason == "tool_use" or tool_buf:
         # 注意：这里**不**置 done_yielded —— 与 OpenAI 路径一致，工具调用之后
         # 仍要补一个 DONE 事件收尾，否则上层拿不到本轮结束信号（会一直等）。
@@ -969,8 +1008,17 @@ def _chat_stream_impl(config, messages, tools=None, cancel_event=None, verify_ss
     # 都没收到 = 连接被静默掐断，回复是残缺的，不能当正常结束。
     saw_terminator = False
 
+    _last_content_ts = time.time()  # 饥饿看门狗：最后一次收到真内容的时刻
+
     try:
         for raw_line in resp:
+            # 饥饿检查（与 Anthropic 路径同源）：连接活着但内容字节不来超
+            # 阈值 → 主动断开。文案含 "timeout" → 命中 TRANSIENT_MARKERS →
+            # 上层按瞬时故障重试/换源。（socket timeout 只覆盖完全静默场景）
+            if time.time() - _last_content_ts > SSE_STARVE_TIMEOUT:
+                raise TimeoutError(
+                    f"llm stream timeout: SSE content starvation "
+                    f"{time.time() - _last_content_ts:.0f}s (keepalive only, no content)")
             if cancel_event and cancel_event.is_set():
                 resp.close()
                 _log_raw_response(log_group, "cancelled",
@@ -992,6 +1040,9 @@ def _chat_stream_impl(config, messages, tools=None, cancel_event=None, verify_ss
                 obj = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            # 解析成功的 JSON 事件算内容——喂看门狗（OpenAI 格式没有 ping 事件，
+            # 保活只会以注释行/空行出现，在上方就被跳过，不会误喂）
+            _last_content_ts = time.time()
 
             # Capture usage from final chunk
             if "usage" in obj and obj["usage"] is not None:

@@ -251,6 +251,12 @@ FOLDED_TOOL_GROUPS = {
             "om_observe", "om_compare", "om_stats", "audit_check",
         ],
     },
+    "tool_output": {
+        "description": "超限工具输出的有界引用翻页：当工具结果被换成 {_ref, head, tail} 摘要时，用它取回完整内容",
+        "tools": [
+            "read_tool_output", "tool_output_stats",
+        ],
+    },
     "file_versioning": {
         "description": "文件修改历史与回溯：查看修改历史链、恢复文件到任意历史版本",
         "tools": [

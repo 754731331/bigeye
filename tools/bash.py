@@ -157,9 +157,11 @@ def _stream_consumer_thread(q, stop_event, on_output, tool_id, out_ringbuf, max_
 
 @register_tool(
     name="bash",
-    description="执行系统命令，返回 stdout/stderr 和退出码。危险操作（删文件/杀进程等）需 confirm=true。"
-                "改文件优先 edit_file/write_file（有历史可回溯），bash 仅用于运行命令/装依赖/编译；"
-                "禁用 bash 重定向改文件、禁用 python -c 跑多行代码（cmd 拆行致空输出，先 write_file 再执行）。",
+    description="执行系统命令，返回 stdout/stderr 和退出码。Windows 默认后端为 Git Bash（ls/grep/head/sed/管道等 posix 用法可直接用）；"
+                "命令含 cmd 独有特征（dir/copy/del/type 查类型/ver/set/%VAR%/findstr/单个 & 等）时自动回落 cmd.exe。"
+                "危险操作（删文件/杀进程等）需 confirm=true。改文件优先 edit_file/write_file（有历史可回溯），"
+                "bash 仅用于运行命令/装依赖/编译；别用 bash 重定向写文件。多行 python -c 仅在纯 posix 命令下可靠，"
+                "命令一旦回落 cmd 分支会被拆行成空输出，多行逻辑请先 write_file 再 run_python。",
     parameters={
         "type": "object",
         "properties": {
@@ -188,6 +190,7 @@ def _stream_consumer_thread(q, stop_event, on_output, tool_id, out_ringbuf, max_
 )
 def bash(command: str, timeout: int = 120, workdir: str = "", confirm: bool = False):
     from .file_tools import _safe_path, _check_boundary
+    from .shell_router import _pick_shell, _build_argv, _why
     # Resolve workdir through safe path + boundary check
     if workdir:
         cwd = _safe_path(workdir)
@@ -219,12 +222,16 @@ def bash(command: str, timeout: int = 120, workdir: str = "", confirm: bool = Fa
         }
 
     # ── Execute with streaming output ──
-    # Windows: 切换控制台到 UTF-8，避免中文输出/文件写入乱码
-    actual_cmd = command
-    if os.name == 'nt':
-        actual_cmd = 'chcp 65001 >nul 2>&1 && ' + command
+    # 后端路由：默认 Git Bash（posix 工具可用），命中 cmd 特征才回落 cmd.exe。
+    # 危险命令护栏 _check_danger() 已在上面执行完，路由不影响其行为。
+    shell = _pick_shell(command)
+    actual_cmd, env_extra, use_shell = _build_argv(command, shell)
+    if os.environ.get('BIGEYE_SHELL_DEBUG'):
+        # 排查用：BIGEYE_SHELL_DEBUG=1 时在服务端控制台打印路由决策
+        print(f"[bash] shell={shell} why={_why(command)} cmd={command[:80]}")
 
-    env = {**os.environ, 'PYTHONIOENCODING': 'utf-8', 'LANG': 'en_US.UTF-8'}
+
+    env = {**os.environ, 'PYTHONIOENCODING': 'utf-8', 'LANG': 'en_US.UTF-8', **env_extra}
     # Windows: CREATE_NEW_PROCESS_GROUP 让 taskkill /T 能 kill 整个进程树；
     # CREATE_NO_WINDOW 抑制黑窗口弹出（否则每次调用都闪一下控制台，抢用户焦点）
     creationflags = 0
@@ -256,7 +263,7 @@ def bash(command: str, timeout: int = 120, workdir: str = "", confirm: bool = Fa
     try:
         proc = subprocess.Popen(
             actual_cmd,
-            shell=True,
+            shell=use_shell,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

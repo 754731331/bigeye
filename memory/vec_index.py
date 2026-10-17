@@ -124,19 +124,39 @@ class VecIndex:
             conn.close()
 
     def insert(self, table_name: str, row_id: int, embedding: list[float]):
-        """Insert or replace a vector entry."""
+        """Insert or replace a vector entry.
+
+        注意：sqlite-vec 的 vec0 不支持 INSERT OR REPLACE（同 rowid 会报
+        UNIQUE constraint failed on ... primary key），需先 DELETE 再 INSERT。
+        """
+        self.insert_many(table_name, [(row_id, embedding)])
+
+    def insert_many(self, table_name: str, items):
+        """批量插入 [(row_id, embedding), ...]。
+
+        单条 insert 每行新开连接 + 重载 vec0 扩展，重建上万条索引时极慢，
+        因此提供共享连接的批量路径。
+        """
         if not self._vec_loaded:
-            return
-        emb_json = json.dumps(embedding)
+            return 0
         conn = self._get_conn()
+        n = 0
         try:
-            conn.execute(
-                f"INSERT OR REPLACE INTO {table_name}(rowid, embedding) VALUES (?, ?)",
-                (row_id, emb_json)
-            )
+            for row_id, embedding in items:
+                emb_json = json.dumps(embedding)
+                try:
+                    conn.execute(f"DELETE FROM {table_name} WHERE rowid=?", (row_id,))
+                except sqlite3.OperationalError:
+                    pass
+                conn.execute(
+                    f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+                    (row_id, emb_json)
+                )
+                n += 1
             conn.commit()
         finally:
             conn.close()
+        return n
 
     def delete(self, table_name: str, row_id: int):
         """Remove a vector entry by rowid."""

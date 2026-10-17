@@ -18,7 +18,7 @@
 #mainPanel > footer .input-row{pointer-events:auto}
 #mainPanel > footer .input-row > #attachPreview{pointer-events:auto;grid-column:1/-1;grid-row:1}
 footer .input-row:has(#attachPreview[style*="display: flex"]) textarea{grid-row:2!important}
-footer .input-row:has(#attachPreview[style*="display: flex"]) .attach-btn,footer .input-row:has(#attachPreview[style*="display: flex"]) .send,footer .input-row:has(#attachPreview[style*="display: flex"]) .task-model-btn{grid-row:3!important}
+footer .input-row:has(#attachPreview[style*="display: flex"]) .attach-btn,footer .input-row:has(#attachPreview[style*="display: flex"]) .send,footer .input-row:has(#attachPreview[style*="display: flex"]) .task-model-btn,footer .input-row:has(#attachPreview[style*="display: flex"]) .task-outside-btn{grid-row:3!important}
 #mainPanel > main{padding-bottom:calc(var(--composer-space,110px) + 16px)!important;scroll-padding-bottom:calc(var(--composer-space,110px) + 16px)}
 footer::before,footer::after{display:none!important}
 footer #attachPreview{background:transparent!important;border-top:0!important;padding:2px 2px 6px!important;width:100%;flex-wrap:nowrap!important;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;}
@@ -27,7 +27,7 @@ footer .input-row{border:1px solid var(--border2)!important;border-radius:22px!i
 footer .input-row textarea{min-height:26px!important;max-height:120px!important;padding:2px 5px!important;background:transparent!important;box-shadow:none!important;border:0!important}
 footer .input-row .attach-btn{height:30px!important;width:30px!important}
 footer .input-row .send{height:30px!important;width:30px!important;min-height:30px!important}
-footer .task-model-btn{padding:4px 8px!important;font-size:12px!important}
+footer .task-model-btn,footer .task-outside-btn{padding:4px 8px!important;font-size:12px!important}
 footer .input-row textarea:focus{box-shadow:none!important}
 
 /* ===== 回到底部按钮：抬到悬浮输入框之上，不再被压住 ===== */
@@ -50,12 +50,12 @@ html body #btnJump.show{opacity:1;pointer-events:auto;transform:translateY(0)}
 .task-sheet-grip:focus{outline:none}
 footer .input-row{transform-origin:center bottom;transition:none}
 
-footer .input-row textarea,footer .input-row .attach-btn,footer .input-row .send,footer .task-model-btn{transition:none!important}
+footer .input-row textarea,footer .input-row .attach-btn,footer .input-row .send,footer .task-model-btn,footer .task-outside-btn{transition:none!important}
 footer:not(.composer-compact) .input-row{padding:10px 12px!important;gap:6px!important}
 footer:not(.composer-compact) .input-row textarea{min-height:34px!important;padding:4px 5px!important}
 footer:not(.composer-compact) .input-row .attach-btn,footer:not(.composer-compact) .input-row .send{width:34px!important;height:34px!important;min-height:34px!important}
-footer:not(.composer-compact) .task-model-btn{padding:6px 8px!important}
-@media(prefers-reduced-motion:reduce){footer .input-row,footer .input-row textarea,footer .input-row .attach-btn,footer .input-row .send,footer .task-model-btn{transition:none!important}.task-model-sheet,.task-model-sheet>div{transition:none}}
+footer:not(.composer-compact) .task-model-btn,footer:not(.composer-compact) .task-outside-btn{padding:6px 8px!important}
+@media(prefers-reduced-motion:reduce){footer .input-row,footer .input-row textarea,footer .input-row .attach-btn,footer .input-row .send,footer .task-model-btn,footer .task-outside-btn{transition:none!important}.task-model-sheet,.task-model-sheet>div{transition:none}}
 `;
   document.head.appendChild(css);
 
