@@ -30,6 +30,12 @@ fi
 
 mkdir -p "$WORKDIR/data"
 
+# model_config.json 含 API 密钥、不入库（见 .gitignore）。首次运行时从示例创建。
+if [ ! -f "$WORKDIR/model_config.json" ] && [ -f "$WORKDIR/model_config.example.json" ]; then
+    cp "$WORKDIR/model_config.example.json" "$WORKDIR/model_config.json"
+    echo "已从 model_config.example.json 创建 model_config.json（请填入你的 API 配置）"
+fi
+
 echo "================================"
 echo "  大眼X (macOS)"
 echo "================================"

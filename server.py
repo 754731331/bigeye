@@ -1699,8 +1699,13 @@ def get_task_model_config(tid):
                         api_key=cp.get('api_key', ''), protocol=cp.get('protocol', ''),
                         extra_headers=cp.get('extra_headers', {}))
         # Registered fallback configs retain their own credentials and protocol.
-        with open(os.path.join(ROOT_DIR, 'model_config.json'), encoding='utf-8') as f:
-            _raw = json.load(f)
+        # model_config.json 含密钥、不入库（见 .gitignore）：首次 clone 可能还没有，
+        # 缺失时按空配置处理，不能因 open 失败把整条模型解析链路打断。
+        try:
+            with open(os.path.join(ROOT_DIR, 'model_config.json'), encoding='utf-8') as f:
+                _raw = json.load(f)
+        except (OSError, ValueError):
+            _raw = {}
         for item in _raw.get('fallback_chain', []):
             if item.get('provider') == provider:
                 return dict(provider=provider, model=model,
