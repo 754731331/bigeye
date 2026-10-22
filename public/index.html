@@ -11610,7 +11610,7 @@ function _mmThemeVars(){
   lineColor:white?'rgba(31,41,55,.5)':'rgba(255,255,255,.5)', secondaryColor:'transparent', tertiaryColor:'transparent',
   fontSize:'14px' } };
 }
-mermaid.initialize(_mmThemeVars());
+try{ if(window.mermaid&&typeof mermaid.initialize==='function') mermaid.initialize(_mmThemeVars()); }catch(e){}
 
 function _renderTextTree(tree, nodes, stats){
   var lines=[], icons={pending:'○',running:'▶',done:'✓',blocked:'⏸',failed:'✗',split:'↳'};

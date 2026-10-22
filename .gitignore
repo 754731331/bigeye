@@ -25,3 +25,6 @@ dist/
 
 # macOS
 .DS_Store
+
+# 运行时数据目录（源码运行生成）
+data/
