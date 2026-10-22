@@ -22,3 +22,6 @@ dist/
 发布/
 .venv/
 .env
+
+# macOS
+.DS_Store

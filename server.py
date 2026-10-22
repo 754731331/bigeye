@@ -6283,11 +6283,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self._json(500, {"ok": False, "error": "缺少 _app_restart.py"})
                     return
                 port_now = self.server.server_address[1]
+                # 跨平台启动 helper：Windows 用 DETACHED_PROCESS 脱离控制台，
+                # macOS/Linux 用 start_new_session 脱离进程组（等价 setsid）。
+                _popen_kwargs = dict(cwd=ROOT_DIR, close_fds=True)
+                if os.name == "nt":
+                    _popen_kwargs["creationflags"] = (
+                        subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                    )
+                else:
+                    _popen_kwargs["start_new_session"] = True
                 subprocess.Popen(
                     [sys.executable, helper, str(os.getpid()), str(port_now)],
-                    cwd=ROOT_DIR,
-                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-                    close_fds=True,
+                    **_popen_kwargs,
                 )
                 self._json(200, {"ok": True})
             except Exception as e:

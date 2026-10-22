@@ -34,6 +34,7 @@ _warned_zero_vector = False
 
 _onnx_session = None
 _onnx_tokenizer = None
+_onnx_not_found = False  # 已确认模型缺失，避免每次调用重复打印
 _onnx_lock = threading.Lock()
 _onnx_infer_lock = threading.Lock()  # 保护 tokenizer.encode + session.run（都不是线程安全的）
 ONNX_DIM = 512
@@ -53,14 +54,19 @@ def _get_onnx_model_dir():
 
 def _load_onnx_model():
     """Lazy-load ONNX model + tokenizer."""
-    global _onnx_session, _onnx_tokenizer
+    global _onnx_session, _onnx_tokenizer, _onnx_not_found
     if _onnx_session is not None:
         return _onnx_session
+    if _onnx_not_found:
+        return None
     with _onnx_lock:
         if _onnx_session is not None:
             return _onnx_session
+        if _onnx_not_found:
+            return None
         model_dir = _get_onnx_model_dir()
         if not model_dir:
+            _onnx_not_found = True
             print("[embedder] ONNX model not found — run _export_onnx.py first")
             return None
         try:

@@ -253,6 +253,14 @@ class Database:
     def __init__(self, path=DB_PATH):
         self.path = path
         self._local = threading.local()
+        # macOS/源码运行：data/ 目录可能尚不存在（打包版由 _bootstrap_data 建），
+        # sqlite 不会自动创建父目录，这里先补齐，避免 "unable to open database file"。
+        try:
+            _db_dir = os.path.dirname(os.path.abspath(path))
+            if _db_dir:
+                os.makedirs(_db_dir, exist_ok=True)
+        except Exception:
+            pass
         # 主线程连接 + schema 初始化（每线程独立连接，无全局锁）
         conn = self._get_conn()
         conn.executescript(SCHEMA)
