@@ -2,8 +2,8 @@
 # 大眼X — macOS 启动脚本（对应 Windows 的 start.bat）
 #
 # 用法：
-#   ./start.sh                    # 默认 127.0.0.1:9890（仅本机访问）
-#   ./start.sh --host 0.0.0.0     # 允许局域网访问（手机等设备）
+#   ./start.sh                    # 默认 0.0.0.0:9890（Tailscale/局域网手机可访问）
+#   HOST=127.0.0.1 ./start.sh     # 仅本机访问
 #   PORT=8765 ./start.sh          # 自定义端口
 set -euo pipefail
 
@@ -12,7 +12,7 @@ WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$WORKDIR"
 
 PORT="${PORT:-9890}"
-HOST="${HOST:-127.0.0.1}"
+HOST="${HOST:-0.0.0.0}"   # 默认监听所有网卡（Tailscale/局域网手机可访问）；仅本机用可改 127.0.0.1
 LOGFILE="$WORKDIR/data/server_output.log"
 
 # 探测 Python 解释器：优先项目虚拟环境，其次系统 python3
